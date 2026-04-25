@@ -1,0 +1,17 @@
+[package]
+name = "hasp"
+version = "0.1.0-alpha"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+authors = ["Hasp Contributors"]
+description = "Secrets and keyring frontend CLI. Part of the rustpunk portfolio."
+repository = "https://github.com/rustpunk/hasp"
+homepage = "https://github.com/rustpunk/hasp"
+readme = "README.md"
+keywords = ["secrets", "keyring", "cli", "rustpunk"]
+categories = ["command-line-utilities"]
+
+[lib]
+path = "src/lib.rs"
+
+[workspace]
