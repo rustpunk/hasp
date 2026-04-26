@@ -7,8 +7,11 @@
 //!   - `?field=`  — optional key to extract from the JSON `data.data`
 //!     object. When absent, the entire object is serialized.
 //!
-//! Supported operations: `get`, `exists`.
-//! `put`, `list`, `delete`: `UnsupportedOperation`.
+//! Supported operations: `get`, `list`, `delete`, `exists`.
+//!
+//! `put` is deferred: KV v2 stores JSON objects under `data.data`. A URL with
+//! `?field=password` implies field-level update, which requires read-modify-write
+//! semantics that `Backend::put` does not yet define.
 //!
 //! Authentication is ambient only: `VAULT_ADDR` and `VAULT_TOKEN`.
 //! If either is missing, every operation fails fast with
@@ -127,18 +130,114 @@ impl Backend for VaultBackend {
         })
     }
 
-    fn list(&self, _url: &Url) -> Result<Vec<Entry>, Error> {
-        Err(Error::UnsupportedOperation {
+    fn list(&self, url: &Url) -> Result<Vec<Entry>, Error> {
+        check_ambient_credentials()?;
+        let vault_url = VaultUrl::try_from(url)?;
+        let (token, addr) = ambient_credentials()?;
+
+        // Convert the URL path into a metadata list prefix.
+        // KV v2 paths like /data/myapp/config become myapp (parent dir)
+        // for the LIST /v1/{mount}/metadata/{prefix} endpoint.
+        let path_str = vault_url.path.trim_start_matches('/');
+        let prefix = if path_str.starts_with("data/") {
+            let after_data = &path_str["data/".len()..];
+            after_data.rfind('/').map(|i| &after_data[..i]).unwrap_or("")
+        } else {
+            path_str.rfind('/').map(|i| &path_str[..i]).unwrap_or("")
+        };
+
+        let metadata_path = if prefix.is_empty() {
+            "/metadata".into()
+        } else {
+            format!("/metadata/{prefix}")
+        };
+
+        let request_url = build_request_url(&addr,
+            &vault_url.mount,
+            &metadata_path,
+        );
+
+        let client = build_client()?;
+        let response = client
+            .request(
+                reqwest::Method::from_bytes(b"LIST").expect("LIST is a valid HTTP method"),
+                &request_url,
+            )
+            .header("X-Vault-Token", &token)
+            .send()
+            .map_err(map_reqwest_error)?;
+
+        let status = response.status();
+        if status != reqwest::StatusCode::OK {
+            return Err(map_vault_status(status, url));
+        }
+
+        let body: serde_json::Value = response.json().map_err(|e| Error::Backend {
             scheme: "vault",
-            operation: "list",
-        })
+            kind: BackendFailureKind::Permanent,
+            message: format!("invalid JSON from Vault: {e}"),
+        })?;
+
+        let keys = body
+            .get("data")
+            .and_then(|d| d.get("keys"))
+            .and_then(|k| k.as_array())
+            .ok_or_else(|| Error::Backend {
+                scheme: "vault",
+                kind: BackendFailureKind::Permanent,
+                message: "Vault LIST response missing data.keys field".into(),
+            })?;
+
+        let mut entries = Vec::new();
+        for key in keys {
+            let name = key.as_str().unwrap_or("").trim_end_matches('/').to_owned();
+            if name.is_empty() {
+                continue;
+            }
+
+            // Reconstruct a canonical vault:// URL.  List entries are
+            // whole secrets, so strip any ?field= from the original URL.
+            let entry_url = if vault_url.path.starts_with("/data/") {
+                let base_path = vault_url.path.trim_start_matches("/data/");
+                let parent =
+                    base_path.rfind('/').map(|i| &base_path[..i]).unwrap_or("");
+                format!("vault://{}/data/{}/{name}", vault_url.mount, parent)
+            } else {
+                format!("vault://{}/{name}", vault_url.mount)
+            };
+
+            let parsed = Url::parse(&entry_url).map_err(|e| Error::Backend {
+                scheme: "vault",
+                kind: BackendFailureKind::Permanent,
+                message: format!("failed to parse list entry URL: {e}"),
+            })?;
+
+            entries.push(Entry { name, url: parsed });
+        }
+
+        Ok(entries)
     }
 
-    fn delete(&self, _url: &Url) -> Result<(), Error> {
-        Err(Error::UnsupportedOperation {
-            scheme: "vault",
-            operation: "delete",
-        })
+    fn delete(&self, url: &Url) -> Result<(), Error> {
+        check_ambient_credentials()?;
+        let vault_url = VaultUrl::try_from(url)?;
+        let (token, addr) = ambient_credentials()?;
+        let request_url = build_request_url(&addr,
+            &vault_url.mount,
+            &vault_url.path,
+        );
+
+        let client = build_client()?;
+        let response = client
+            .delete(&request_url)
+            .header("X-Vault-Token", &token)
+            .send()
+            .map_err(map_reqwest_error)?;
+
+        match response.status() {
+            reqwest::StatusCode::NO_CONTENT => Ok(()),
+            status => Err(map_vault_status(status, url)),
+        }
     }
 
     fn exists(&self, url: &Url) -> Result<bool, Error> {
@@ -511,5 +610,82 @@ mod tests {
         let _token_guard = EnvGuard::set("VAULT_TOKEN", "test-token");
         let _addr_guard = EnvGuard::set("VAULT_ADDR", "http://localhost:8200");
         assert!(check_ambient_credentials().is_ok());
+    }
+
+    #[test]
+    fn list_parsing_from_json() {
+        let body = serde_json::json!({
+            "data": {
+                "keys": [
+                    "app/",
+                    "db/",
+                    "shared"
+                ]
+            }
+        });
+
+        let keys = body
+            .get("data")
+            .and_then(|d| d.get("keys"))
+            .and_then(|k| k.as_array())
+            .expect("keys array");
+
+        assert_eq!(keys.len(), 3);
+        let names: Vec<String> = keys
+            .iter()
+            .map(|k| {
+                let s = k.as_str().unwrap_or("").trim_end_matches('/');
+                s.to_owned()
+            })
+            .collect();
+        assert_eq!(names, vec!["app", "db", "shared"]);
+    }
+
+    #[test]
+    fn list_url_strips_field_query() {
+        // list entries are whole secrets, not fields
+        let url = Url::parse("vault://secret/data/myapp/config?field=password").unwrap();
+        let v = VaultUrl::try_from(&url).unwrap();
+        assert_eq!(v.mount, "secret");
+        assert_eq!(v.path, "/data/myapp/config");
+        // The field is dropped when constructing the entry URL in list()
+    }
+
+    #[test]
+    fn supported_and_deferred_operations() {
+        let backend = VaultBackend::new();
+        let url = Url::parse("vault://secret/data/test?field=password").unwrap();
+
+        assert!(
+            matches!(
+                backend.delete(&url),
+                Err(Error::AuthenticationFailed(_))
+                    | Err(Error::Backend { .. })
+                    | Err(Error::NotFound(_))
+            ),
+            "delete now supported (fails at network layer)"
+        );
+
+        assert!(
+            matches!(
+                backend.list(&url),
+                Err(Error::AuthenticationFailed(_))
+                    | Err(Error::Backend { .. })
+                    | Err(Error::NotFound(_))
+            ),
+            "list now supported (fails at network layer)"
+        );
+
+        let dummy = SecretString::new("x".into());
+        assert!(
+            matches!(
+                backend.put(&url, &dummy),
+                Err(Error::UnsupportedOperation {
+                    scheme: "vault",
+                    operation: "put",
+                })
+            ),
+            "put remains deferred"
+        );
     }
 }
