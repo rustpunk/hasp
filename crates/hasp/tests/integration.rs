@@ -825,3 +825,116 @@ mod bw_tests {
         ));
     }
 }
+
+#[cfg(not(feature = "gcp-sm"))]
+mod gcp_sm_disabled_tests {
+    use super::*;
+
+    #[test]
+    fn gcp_sm_unknown_when_disabled() {
+        let store = Store::with_defaults();
+        let err = store.get("gcp-sm://my-project/my-secret").unwrap_err();
+        assert!(
+            matches!(
+                err,
+                hasp::Error::UnknownScheme(ref s) if s == "gcp-sm"
+            )
+        );
+    }
+}
+
+#[cfg(feature = "gcp-sm")]
+mod gcp_sm_tests {
+    use super::*;
+
+    fn gcp_sm_available() -> bool {
+        std::env::var("GOOGLE_APPLICATION_CREDENTIALS").is_ok()
+    }
+
+    #[test]
+    fn gcp_sm_get_roundtrip() {
+        if !gcp_sm_available() {
+            return;
+        }
+
+        let _lock = ENV_LOCK.lock().unwrap();
+        let store = Store::with_defaults();
+
+        let result = store.get("gcp-sm://my-project/hasp-test-secret");
+        assert!(
+            matches!(
+                result,
+                Ok(_) | Err(hasp::Error::NotFound(_)) | Err(hasp::Error::Backend { .. })
+            ),
+            "unexpected error: {result:?}"
+        );
+    }
+
+    #[test]
+    fn gcp_sm_exists() {
+        if !gcp_sm_available() {
+            return;
+        }
+
+        let _lock = ENV_LOCK.lock().unwrap();
+        let store = Store::with_defaults();
+
+        let result = store.exists("gcp-sm://my-project/hasp-test-secret");
+        assert!(
+            matches!(
+                result,
+                Ok(_) | Err(hasp::Error::NotFound(_)) | Err(hasp::Error::Backend { .. })
+            ),
+            "unexpected error: {result:?}"
+        );
+    }
+
+    #[test]
+    fn gcp_sm_not_found() {
+        if !gcp_sm_available() {
+            return;
+        }
+
+        let _lock = ENV_LOCK.lock().unwrap();
+        let store = Store::with_defaults();
+
+        let err = store
+            .get("gcp-sm://my-project/hasp-test-nonexistent/not-real")
+            .unwrap_err();
+
+        assert!(
+            matches!(err, hasp::Error::NotFound(_) | hasp::Error::Backend { .. }),
+            "expected NotFound or Backend error for a missing secret, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn gcp_sm_unsupported_operations() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let store = Store::with_defaults();
+        let url = "gcp-sm://my-project/hasp-test-secret";
+        let secret = hasp::SecretString::new("x".into());
+
+        assert!(matches!(
+            store.put(url, &secret),
+            Err(hasp::Error::UnsupportedOperation {
+                scheme: "gcp-sm",
+                operation: "put",
+            })
+        ));
+        assert!(matches!(
+            store.list(url),
+            Err(hasp::Error::UnsupportedOperation {
+                scheme: "gcp-sm",
+                operation: "list",
+            })
+        ));
+        assert!(matches!(
+            store.delete(url),
+            Err(hasp::Error::UnsupportedOperation {
+                scheme: "gcp-sm",
+                operation: "delete",
+            })
+        ));
+    }
+}

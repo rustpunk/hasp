@@ -12,7 +12,7 @@ name = "hasp"
 path = "src/main.rs"
 
 [features]
-default = ["env", "file", "keyring", "op", "vault", "bw", "aws-sm", "aws-ssm"]
+default = ["env", "file", "keyring", "op", "vault", "bw", "aws-sm", "aws-ssm", "gcp-sm"]
 env = ["hasp/env"]
 file = ["hasp/file"]
 keyring = ["hasp/keyring"]
@@ -21,6 +21,7 @@ vault = ["hasp/vault"]
 bw = ["hasp/bw"]
 aws-sm = ["hasp/aws-sm"]
 aws-ssm = ["hasp/aws-ssm"]
+gcp-sm = ["hasp/gcp-sm"]
 
 [dependencies]
 hasp = { path = "../hasp" }

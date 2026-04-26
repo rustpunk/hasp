@@ -8,6 +8,7 @@
 //! - `aws-ssm://region/parameter-name` — AWS SSM Parameter Store (feature `aws-ssm`)
 //! - `env://VAR_NAME` — environment variables (feature `env`)
 //! - `file:///path/to/secret` — local files (feature `file`)
+//! - `gcp-sm://project/secret-id?version=3` — Google Cloud Secret Manager (feature `gcp-sm`)
 //! - `keyring://service/account` — OS keyring (feature `keyring`)
 //! - `op://vault/item/field` — 1Password CLI (feature `op`)
 //! - `vault://mount/path?field=key` — HashiCorp Vault (feature `vault`)
@@ -58,6 +59,9 @@ pub use hasp_backend_vault::VaultBackend;
 #[cfg(feature = "bw")]
 pub use hasp_backend_bw::BwBackend;
 
+#[cfg(feature = "gcp-sm")]
+pub use hasp_backend_gcp_sm::GcpSmBackend;
+
 use std::collections::HashMap;
 use std::sync::Arc;
 use url::Url;
@@ -99,6 +103,10 @@ pub enum Backend {
     #[cfg(feature = "bw")]
     Bw(BwBackend),
 
+    /// Google Cloud Secret Manager REST backend (`gcp-sm://`).
+    #[cfg(feature = "gcp-sm")]
+    GcpSm(GcpSmBackend),
+
     /// Dynamically-registered backend.
     Custom(Arc<dyn CustomBackend>),
 }
@@ -123,6 +131,8 @@ impl Backend {
             Backend::Vault(_) => "vault",
             #[cfg(feature = "bw")]
             Backend::Bw(_) => "bw",
+            #[cfg(feature = "gcp-sm")]
+            Backend::GcpSm(_) => "gcp-sm",
             Backend::Custom(b) => b.scheme(),
         }
     }
@@ -145,6 +155,8 @@ impl Backend {
             Backend::Vault(b) => b.get(url),
             #[cfg(feature = "bw")]
             Backend::Bw(b) => b.get(url),
+            #[cfg(feature = "gcp-sm")]
+            Backend::GcpSm(b) => b.get(url),
             Backend::Custom(b) => b.get(url),
         }
     }
@@ -167,6 +179,8 @@ impl Backend {
             Backend::Vault(b) => b.put(url, value),
             #[cfg(feature = "bw")]
             Backend::Bw(b) => b.put(url, value),
+            #[cfg(feature = "gcp-sm")]
+            Backend::GcpSm(b) => b.put(url, value),
             Backend::Custom(b) => b.put(url, value),
         }
     }
@@ -189,6 +203,8 @@ impl Backend {
             Backend::Vault(b) => b.list(url),
             #[cfg(feature = "bw")]
             Backend::Bw(b) => b.list(url),
+            #[cfg(feature = "gcp-sm")]
+            Backend::GcpSm(b) => b.list(url),
             Backend::Custom(b) => b.list(url),
         }
     }
@@ -211,6 +227,8 @@ impl Backend {
             Backend::Vault(b) => b.delete(url),
             #[cfg(feature = "bw")]
             Backend::Bw(b) => b.delete(url),
+            #[cfg(feature = "gcp-sm")]
+            Backend::GcpSm(b) => b.delete(url),
             Backend::Custom(b) => b.delete(url),
         }
     }
@@ -233,6 +251,8 @@ impl Backend {
             Backend::Vault(b) => b.exists(url),
             #[cfg(feature = "bw")]
             Backend::Bw(b) => b.exists(url),
+            #[cfg(feature = "gcp-sm")]
+            Backend::GcpSm(b) => b.exists(url),
             Backend::Custom(b) => b.exists(url),
         }
     }
@@ -291,6 +311,10 @@ impl Store {
         #[cfg(feature = "bw")]
         {
             backends.insert("bw", Backend::Bw(BwBackend::new()));
+        }
+        #[cfg(feature = "gcp-sm")]
+        {
+            backends.insert("gcp-sm", Backend::GcpSm(GcpSmBackend::new()));
         }
         Self { backends }
     }
