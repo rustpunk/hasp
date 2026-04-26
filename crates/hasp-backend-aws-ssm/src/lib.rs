@@ -325,14 +325,14 @@ mod tests {
     fn parse_valid_url_with_decryption_false() {
         let url = Url::parse("aws-ssm://eu-west-1/my-param?with-decryption=false").unwrap();
         let aws = AwsSsmUrl::try_from(&url).unwrap();
-        assert_eq!(aws.with_decryption, false);
+        assert!(!aws.with_decryption);
     }
 
     #[test]
     fn parse_valid_url_with_decryption_true() {
         let url = Url::parse("aws-ssm://ap-south-1/my-param?with-decryption=true").unwrap();
         let aws = AwsSsmUrl::try_from(&url).unwrap();
-        assert_eq!(aws.with_decryption, true);
+        assert!(aws.with_decryption);
     }
 
     #[test]

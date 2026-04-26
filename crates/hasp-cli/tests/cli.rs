@@ -1,0 +1,205 @@
+//! Integration tests for `hasp-cli`.
+//!
+//! Tests invoke the compiled `hasp` binary via `std::process::Command`.
+//! They do not depend on external services; secret values come from
+//! `env://` and `file://` backends only.
+
+use std::process::{Command, Stdio};
+
+fn hasp() -> Command {
+    let mut path = std::env::current_exe().unwrap();
+    path.pop();
+    path.pop();
+    path.push("hasp");
+    let mut cmd = Command::new(&path);
+    cmd.env_remove("HASP_TEST_INTEGRATION");
+    cmd
+}
+
+#[test]
+fn cli_help_exits_zero() {
+    let output = hasp().arg("--help").output().unwrap();
+    assert!(
+        output.status.success(),
+        "hasp --help failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Unified secrets CLI"), "help missing title");
+    assert!(stdout.contains("get"), "help missing get subcommand");
+    assert!(stdout.contains("put"), "help missing put subcommand");
+}
+
+#[test]
+fn cli_get_env_roundtrip() {
+    let _guard = EnvGuard::set("HASP_CLI_TEST_SECRET", "my-secret-value");
+
+    let output = hasp()
+        .args(["get", "env://HASP_CLI_TEST_SECRET"])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "hasp get failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim_end(),
+        "my-secret-value"
+    );
+}
+
+#[test]
+fn cli_exists_env() {
+    let _guard = EnvGuard::set("HASP_CLI_TEST_EXISTS", "1");
+
+    let output = hasp()
+        .args(["exists", "env://HASP_CLI_TEST_EXISTS"])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "hasp exists (true) failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn cli_exists_env_missing() {
+    std::env::remove_var("HASP_CLI_TEST_EXISTS_MISSING");
+
+    let output = hasp()
+        .args(["exists", "env://HASP_CLI_TEST_EXISTS_MISSING"])
+        .output()
+        .unwrap();
+
+    assert!(
+        !output.status.success(),
+        "hasp exists (false) should return non-zero"
+    );
+}
+
+#[test]
+fn cli_get_file_roundtrip_and_trim() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("secret.txt");
+    std::fs::write(&path, "file-secret\n").unwrap();
+
+    let url = url::Url::from_file_path(&path).unwrap().to_string();
+
+    let output = hasp().args(["get", &url]).output().unwrap();
+
+    assert!(
+        output.status.success(),
+        "hasp get file failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim_end(),
+        "file-secret"
+    );
+}
+
+#[test]
+fn cli_put_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("written.txt");
+    let url = url::Url::from_file_path(&path).unwrap().to_string();
+
+    let child = hasp()
+        .args(["put", &url, "written-value"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "hasp put failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let contents = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(contents, "written-value");
+}
+
+#[test]
+fn cli_profile_resolution() {
+    let dir = tempfile::tempdir().unwrap();
+    let profile_path = dir.path().join("profiles.toml");
+    std::fs::write(
+        &profile_path,
+        r#"
+[profiles.test]
+my_secret = "env://HASP_CLI_PROFILE_SECRET"
+"#,
+    )
+    .unwrap();
+
+    let _guard = EnvGuard::set("HASP_CLI_PROFILE_SECRET", "profile-works");
+
+    let output = hasp()
+        .args(["get", "@test/my_secret"])
+        .env("HASP_PROFILES_PATH", profile_path.as_os_str())
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "hasp get @profile failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim_end(),
+        "profile-works"
+    );
+}
+
+#[test]
+fn cli_unknown_scheme() {
+    let output = hasp()
+        .args(["get", "unknown://thing"])
+        .output()
+        .unwrap();
+
+    assert!(
+        !output.status.success(),
+        "hasp get unknown:// should fail"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("unsupported scheme"),
+        "expected 'unsupported scheme' in stderr, got: {stderr}"
+    );
+}
+
+// Guard that sets an environment variable for the duration of a test
+// and restores it afterward.
+struct EnvGuard {
+    key: String,
+    old: Option<String>,
+}
+
+impl EnvGuard {
+    fn set(key: &str, value: &str) -> Self {
+        let old = std::env::var(key).ok();
+        std::env::set_var(key, value);
+        Self {
+            key: key.into(),
+            old,
+        }
+    }
+}
+
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        match &self.old {
+            Some(v) => std::env::set_var(&self.key, v),
+            None => std::env::remove_var(&self.key),
+        }
+    }
+}

@@ -1,0 +1,37 @@
+[package]
+name = "hasp-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "hasp CLI — unified secrets command-line tool. Thin shell over the hasp library."
+
+[[bin]]
+name = "hasp"
+path = "src/main.rs"
+
+[features]
+default = ["env", "file", "keyring", "op", "vault", "bw", "aws-sm", "aws-ssm"]
+env = ["hasp/env"]
+file = ["hasp/file"]
+keyring = ["hasp/keyring"]
+op = ["hasp/op"]
+vault = ["hasp/vault"]
+bw = ["hasp/bw"]
+aws-sm = ["hasp/aws-sm"]
+aws-ssm = ["hasp/aws-ssm"]
+
+[dependencies]
+hasp = { path = "../hasp" }
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+dirs = "6"
+rpassword = "7"
+secrecy = "0.10"
+
+[dev-dependencies]
+tempfile = "3"
+url = "2.5"
