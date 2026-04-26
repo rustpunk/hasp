@@ -1,0 +1,15 @@
+[package]
+name = "hasp-backend-aws-ssm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "aws-ssm:// backend for hasp — AWS SSM Parameter Store SDK client."
+
+[dependencies]
+hasp-core = { path = "../hasp-core" }
+aws-config = { version = "1", default-features = false, features = ["rustls"] }
+aws-sdk-ssm = { version = "1", default-features = false }
+tokio = { version = "1", features = ["rt"] }
+url = "2.5"

@@ -5,6 +5,7 @@
 //! URL scheme:
 //!
 //! - `aws-sm://region/secret-name` — AWS Secrets Manager (feature `aws-sm`)
+//! - `aws-ssm://region/parameter-name` — AWS SSM Parameter Store (feature `aws-ssm`)
 //! - `env://VAR_NAME` — environment variables (feature `env`)
 //! - `file:///path/to/secret` — local files (feature `file`)
 //! - `keyring://service/account` — OS keyring (feature `keyring`)
@@ -35,6 +36,9 @@ pub use hasp_core::{
 #[cfg(feature = "aws-sm")]
 pub use hasp_backend_aws_sm::AwsSmBackend;
 
+#[cfg(feature = "aws-ssm")]
+pub use hasp_backend_aws_ssm::AwsSsmBackend;
+
 #[cfg(feature = "env")]
 pub use hasp_backend_env::EnvBackend;
 
@@ -62,6 +66,10 @@ pub enum Backend {
     /// AWS Secrets Manager backend (`aws-sm://`).
     #[cfg(feature = "aws-sm")]
     AwsSm(AwsSmBackend),
+
+    /// AWS SSM Parameter Store backend (`aws-ssm://`).
+    #[cfg(feature = "aws-ssm")]
+    AwsSsm(AwsSsmBackend),
 
     /// Environment-variable backend (`env://`).
     #[cfg(feature = "env")]
@@ -93,6 +101,8 @@ impl Backend {
         match self {
             #[cfg(feature = "aws-sm")]
             Backend::AwsSm(_) => "aws-sm",
+            #[cfg(feature = "aws-ssm")]
+            Backend::AwsSsm(_) => "aws-ssm",
             #[cfg(feature = "env")]
             Backend::Env(_) => "env",
             #[cfg(feature = "file")]
@@ -111,6 +121,8 @@ impl Backend {
         match self {
             #[cfg(feature = "aws-sm")]
             Backend::AwsSm(b) => b.get(url),
+            #[cfg(feature = "aws-ssm")]
+            Backend::AwsSsm(b) => b.get(url),
             #[cfg(feature = "env")]
             Backend::Env(b) => b.get(url),
             #[cfg(feature = "file")]
@@ -129,6 +141,8 @@ impl Backend {
         match self {
             #[cfg(feature = "aws-sm")]
             Backend::AwsSm(b) => b.put(url, value),
+            #[cfg(feature = "aws-ssm")]
+            Backend::AwsSsm(b) => b.put(url, value),
             #[cfg(feature = "env")]
             Backend::Env(b) => b.put(url, value),
             #[cfg(feature = "file")]
@@ -147,6 +161,8 @@ impl Backend {
         match self {
             #[cfg(feature = "aws-sm")]
             Backend::AwsSm(b) => b.list(url),
+            #[cfg(feature = "aws-ssm")]
+            Backend::AwsSsm(b) => b.list(url),
             #[cfg(feature = "env")]
             Backend::Env(b) => b.list(url),
             #[cfg(feature = "file")]
@@ -165,6 +181,8 @@ impl Backend {
         match self {
             #[cfg(feature = "aws-sm")]
             Backend::AwsSm(b) => b.delete(url),
+            #[cfg(feature = "aws-ssm")]
+            Backend::AwsSsm(b) => b.delete(url),
             #[cfg(feature = "env")]
             Backend::Env(b) => b.delete(url),
             #[cfg(feature = "file")]
@@ -183,6 +201,8 @@ impl Backend {
         match self {
             #[cfg(feature = "aws-sm")]
             Backend::AwsSm(b) => b.exists(url),
+            #[cfg(feature = "aws-ssm")]
+            Backend::AwsSsm(b) => b.exists(url),
             #[cfg(feature = "env")]
             Backend::Env(b) => b.exists(url),
             #[cfg(feature = "file")]
@@ -222,6 +242,10 @@ impl Store {
         #[cfg(feature = "aws-sm")]
         {
             backends.insert("aws-sm", Backend::AwsSm(AwsSmBackend::new()));
+        }
+        #[cfg(feature = "aws-ssm")]
+        {
+            backends.insert("aws-ssm", Backend::AwsSsm(AwsSsmBackend::new()));
         }
         #[cfg(feature = "env")]
         {

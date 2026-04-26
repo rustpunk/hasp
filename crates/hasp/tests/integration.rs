@@ -579,3 +579,114 @@ mod aws_sm_disabled_tests {
         ));
     }
 }
+
+#[cfg(not(feature = "aws-ssm"))]
+mod aws_ssm_disabled_tests {
+    use super::*;
+
+    #[test]
+    fn aws_ssm_unknown_when_disabled() {
+        let store = Store::with_defaults();
+        let err = store.get("aws-ssm://us-east-1/test-param").unwrap_err();
+        assert!(matches!(
+            err,
+            hasp::Error::UnknownScheme(ref s) if s == "aws-ssm"
+        ));
+    }
+}
+
+#[cfg(feature = "aws-ssm")]
+mod aws_ssm_tests {
+    use super::*;
+
+    fn aws_ssm_available() -> bool {
+        std::env::var("AWS_ACCESS_KEY_ID").is_ok() && std::env::var("AWS_SECRET_ACCESS_KEY").is_ok()
+    }
+
+    #[test]
+    fn aws_ssm_get_roundtrip() {
+        if !aws_ssm_available() {
+            return;
+        }
+
+        let _lock = ENV_LOCK.lock().unwrap();
+        let store = Store::with_defaults();
+
+        let result = store.get("aws-ssm://us-east-1/hasp-test/secret");
+        assert!(
+            matches!(
+                result,
+                Ok(_) | Err(hasp::Error::NotFound(_)) | Err(hasp::Error::Backend { .. })
+            ),
+            "unexpected error: {result:?}"
+        );
+    }
+
+    #[test]
+    fn aws_ssm_exists() {
+        if !aws_ssm_available() {
+            return;
+        }
+
+        let _lock = ENV_LOCK.lock().unwrap();
+        let store = Store::with_defaults();
+
+        let result = store.exists("aws-ssm://us-east-1/hasp-test/secret");
+        assert!(
+            matches!(
+                result,
+                Ok(_) | Err(hasp::Error::NotFound(_)) | Err(hasp::Error::Backend { .. })
+            ),
+            "unexpected error: {result:?}"
+        );
+    }
+
+    #[test]
+    fn aws_ssm_not_found() {
+        if !aws_ssm_available() {
+            return;
+        }
+
+        let _lock = ENV_LOCK.lock().unwrap();
+        let store = Store::with_defaults();
+
+        let err = store
+            .get("aws-ssm://us-east-1/hasp-test-nonexistent/not-real")
+            .unwrap_err();
+
+        assert!(
+            matches!(err, hasp::Error::NotFound(_) | hasp::Error::Backend { .. }),
+            "expected NotFound or Backend error for a missing parameter, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn aws_ssm_unsupported_operations() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let store = Store::with_defaults();
+        let url = "aws-ssm://us-east-1/test-param";
+        let secret = hasp::SecretString::new("x".into());
+
+        assert!(matches!(
+            store.put(url, &secret),
+            Err(hasp::Error::UnsupportedOperation {
+                scheme: "aws-ssm",
+                operation: "put",
+            })
+        ));
+        assert!(matches!(
+            store.list(url),
+            Err(hasp::Error::UnsupportedOperation {
+                scheme: "aws-ssm",
+                operation: "list",
+            })
+        ));
+        assert!(matches!(
+            store.delete(url),
+            Err(hasp::Error::UnsupportedOperation {
+                scheme: "aws-ssm",
+                operation: "delete",
+            })
+        ));
+    }
+}

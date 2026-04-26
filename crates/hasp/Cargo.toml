@@ -18,10 +18,12 @@ keyring = ["dep:hasp-backend-keyring"]
 op = ["dep:hasp-backend-op"]
 vault = ["dep:hasp-backend-vault"]
 aws-sm = ["dep:hasp-backend-aws-sm"]
+aws-ssm = ["dep:hasp-backend-aws-ssm"]
 
 [dependencies]
 hasp-core = { path = "../hasp-core" }
 hasp-backend-aws-sm = { path = "../hasp-backend-aws-sm", optional = true }
+hasp-backend-aws-ssm = { path = "../hasp-backend-aws-ssm", optional = true }
 hasp-backend-env = { path = "../hasp-backend-env", optional = true }
 hasp-backend-file = { path = "../hasp-backend-file", optional = true }
 hasp-backend-keyring = { path = "../hasp-backend-keyring", optional = true }
