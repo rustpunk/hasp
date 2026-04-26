@@ -1,0 +1,34 @@
+[package]
+name = "hasp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Unified secrets library with URL-addressed backends. Part of the rustpunk portfolio."
+
+[lib]
+path = "src/lib.rs"
+
+[features]
+default = ["env"]
+env = ["dep:hasp-backend-env"]
+file = ["dep:hasp-backend-file"]
+keyring = ["dep:hasp-backend-keyring"]
+op = ["dep:hasp-backend-op"]
+vault = ["dep:hasp-backend-vault"]
+aws-sm = ["dep:hasp-backend-aws-sm"]
+
+[dependencies]
+hasp-core = { path = "../hasp-core" }
+hasp-backend-aws-sm = { path = "../hasp-backend-aws-sm", optional = true }
+hasp-backend-env = { path = "../hasp-backend-env", optional = true }
+hasp-backend-file = { path = "../hasp-backend-file", optional = true }
+hasp-backend-keyring = { path = "../hasp-backend-keyring", optional = true }
+hasp-backend-op = { path = "../hasp-backend-op", optional = true }
+hasp-backend-vault = { path = "../hasp-backend-vault", optional = true }
+url = "2.5"
+
+[dev-dependencies]
+keyring-core = "1.0"
+tempfile = "3"

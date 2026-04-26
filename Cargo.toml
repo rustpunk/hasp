@@ -1,17 +1,10 @@
-[package]
-name = "hasp"
+[workspace]
+members = ["crates/*"]
+resolver = "2"
+
+[workspace.package]
 version = "0.1.0-alpha"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 authors = ["Hasp Contributors"]
-description = "Unified secrets CLI for OS keyrings, AWS Secrets Manager, HashiCorp Vault, GCP Secret Manager, Azure Key Vault, 1Password, Bitwarden, and dotenv files. Part of the rustpunk portfolio."
 repository = "https://github.com/rustpunk/hasp"
-homepage = "https://github.com/rustpunk/hasp"
-readme = "README.md"
-keywords = ["secrets", "vault", "keyring", "cli", "rustpunk"]
-categories = ["command-line-utilities", "authentication"]
-
-[lib]
-path = "src/lib.rs"
-
-[workspace]

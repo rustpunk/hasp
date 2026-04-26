@@ -1,0 +1,15 @@
+[package]
+name = "hasp-backend-aws-sm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "aws-sm:// backend for hasp — AWS Secrets Manager SDK client."
+
+[dependencies]
+hasp-core = { path = "../hasp-core" }
+aws-config = { version = "1", default-features = false, features = ["rustls"] }
+aws-sdk-secretsmanager = { version = "1", default-features = false }
+tokio = { version = "1", features = ["rt"] }
+url = "2.5"

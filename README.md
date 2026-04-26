@@ -22,7 +22,7 @@ This is a name reservation for the `hasp` crate. The implementation is in develo
 
 ```
 keyring://service/account/key
-aws-sm://name?region=us-west-2&version=AWSCURRENT
+aws-sm://us-west-2/prod/db-password?version-stage=AWSCURRENT
 aws-ssm:///path/to/parameter?with-decryption=true
 vault://kv/data/myapp/db-password
 gcp-sm://projects/<project>/secrets/<name>/versions/latest

@@ -1,0 +1,16 @@
+[package]
+name = "hasp-backend-file"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "file:// backend for hasp — reads secrets from files."
+
+[dependencies]
+hasp-core = { path = "../hasp-core" }
+url = "2.5"
+secrecy = "0.10"
+
+[dev-dependencies]
+tempfile = "3"

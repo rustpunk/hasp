@@ -1,0 +1,13 @@
+[package]
+name = "hasp-backend-env"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "env:// backend for hasp — reads secrets from environment variables."
+
+[dependencies]
+hasp-core = { path = "../hasp-core" }
+url = "2.5"
+secrecy = "0.10"
