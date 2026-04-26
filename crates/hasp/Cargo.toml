@@ -17,6 +17,7 @@ file = ["dep:hasp-backend-file"]
 keyring = ["dep:hasp-backend-keyring"]
 op = ["dep:hasp-backend-op"]
 vault = ["dep:hasp-backend-vault"]
+bw = ["dep:hasp-backend-bw"]
 aws-sm = ["dep:hasp-backend-aws-sm"]
 aws-ssm = ["dep:hasp-backend-aws-ssm"]
 
@@ -29,6 +30,7 @@ hasp-backend-file = { path = "../hasp-backend-file", optional = true }
 hasp-backend-keyring = { path = "../hasp-backend-keyring", optional = true }
 hasp-backend-op = { path = "../hasp-backend-op", optional = true }
 hasp-backend-vault = { path = "../hasp-backend-vault", optional = true }
+hasp-backend-bw = { path = "../hasp-backend-bw", optional = true }
 url = "2.5"
 
 [dev-dependencies]

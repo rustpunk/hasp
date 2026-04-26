@@ -11,6 +11,7 @@
 //! - `keyring://service/account` — OS keyring (feature `keyring`)
 //! - `op://vault/item/field` — 1Password CLI (feature `op`)
 //! - `vault://mount/path?field=key` — HashiCorp Vault (feature `vault`)
+//! - `bw://item/field.path` — Bitwarden CLI (feature `bw`)
 //!
 //! Each backend is feature-gated so consumers pay only for the stores
 //! they use.
@@ -54,6 +55,9 @@ pub use hasp_backend_op::OpBackend;
 #[cfg(feature = "vault")]
 pub use hasp_backend_vault::VaultBackend;
 
+#[cfg(feature = "bw")]
+pub use hasp_backend_bw::BwBackend;
+
 use std::collections::HashMap;
 use std::sync::Arc;
 use url::Url;
@@ -91,6 +95,10 @@ pub enum Backend {
     #[cfg(feature = "vault")]
     Vault(VaultBackend),
 
+    /// Bitwarden CLI backend (`bw://`).
+    #[cfg(feature = "bw")]
+    Bw(BwBackend),
+
     /// Dynamically-registered backend.
     Custom(Arc<dyn CustomBackend>),
 }
@@ -113,6 +121,8 @@ impl Backend {
             Backend::Op(_) => "op",
             #[cfg(feature = "vault")]
             Backend::Vault(_) => "vault",
+            #[cfg(feature = "bw")]
+            Backend::Bw(_) => "bw",
             Backend::Custom(b) => b.scheme(),
         }
     }
@@ -133,6 +143,8 @@ impl Backend {
             Backend::Op(b) => b.get(url),
             #[cfg(feature = "vault")]
             Backend::Vault(b) => b.get(url),
+            #[cfg(feature = "bw")]
+            Backend::Bw(b) => b.get(url),
             Backend::Custom(b) => b.get(url),
         }
     }
@@ -153,6 +165,8 @@ impl Backend {
             Backend::Op(b) => b.put(url, value),
             #[cfg(feature = "vault")]
             Backend::Vault(b) => b.put(url, value),
+            #[cfg(feature = "bw")]
+            Backend::Bw(b) => b.put(url, value),
             Backend::Custom(b) => b.put(url, value),
         }
     }
@@ -173,6 +187,8 @@ impl Backend {
             Backend::Op(b) => b.list(url),
             #[cfg(feature = "vault")]
             Backend::Vault(b) => b.list(url),
+            #[cfg(feature = "bw")]
+            Backend::Bw(b) => b.list(url),
             Backend::Custom(b) => b.list(url),
         }
     }
@@ -193,6 +209,8 @@ impl Backend {
             Backend::Op(b) => b.delete(url),
             #[cfg(feature = "vault")]
             Backend::Vault(b) => b.delete(url),
+            #[cfg(feature = "bw")]
+            Backend::Bw(b) => b.delete(url),
             Backend::Custom(b) => b.delete(url),
         }
     }
@@ -213,6 +231,8 @@ impl Backend {
             Backend::Op(b) => b.exists(url),
             #[cfg(feature = "vault")]
             Backend::Vault(b) => b.exists(url),
+            #[cfg(feature = "bw")]
+            Backend::Bw(b) => b.exists(url),
             Backend::Custom(b) => b.exists(url),
         }
     }
@@ -232,6 +252,7 @@ impl Store {
     ///
     /// Which backends are available depends on Cargo features:
     /// - `aws-sm`
+    /// - `bw`
     /// - `env` (enabled by default)
     /// - `file`
     /// - `keyring`
@@ -266,6 +287,10 @@ impl Store {
         #[cfg(feature = "vault")]
         {
             backends.insert("vault", Backend::Vault(VaultBackend::new()));
+        }
+        #[cfg(feature = "bw")]
+        {
+            backends.insert("bw", Backend::Bw(BwBackend::new()));
         }
         Self { backends }
     }

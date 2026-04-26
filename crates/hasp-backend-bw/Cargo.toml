@@ -1,0 +1,16 @@
+[package]
+name = "hasp-backend-bw"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "bw:// backend for hasp — Bitwarden CLI subprocess wrapper."
+
+[dependencies]
+hasp-core = { path = "../hasp-core" }
+serde_json = "1"
+url = "2.5"
+
+[dev-dependencies]
+url = "2.5"

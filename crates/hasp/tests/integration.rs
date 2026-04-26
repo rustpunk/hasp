@@ -690,3 +690,138 @@ mod aws_ssm_tests {
         ));
     }
 }
+
+#[cfg(not(feature = "bw"))]
+mod bw_disabled_tests {
+    use super::*;
+
+    #[test]
+    fn bw_unknown_when_disabled() {
+        let store = Store::with_defaults();
+        let err = store.get("bw://item/field.path").unwrap_err();
+        assert!(matches!(
+            err,
+            hasp::Error::UnknownScheme(ref s) if s == "bw"
+        ));
+    }
+}
+
+#[cfg(feature = "bw")]
+mod bw_tests {
+    use super::*;
+    use std::process::Command;
+
+    fn bw_available() -> bool {
+        Command::new("bw").arg("--version").status().is_ok()
+    }
+
+    #[test]
+    fn bw_get_roundtrip() {
+        if !bw_available() {
+            return;
+        }
+
+        let _lock = ENV_LOCK.lock().unwrap();
+        let store = Store::with_defaults();
+
+        let result = store.get("bw://test-item/login.password");
+        assert!(
+            matches!(
+                result,
+                Ok(_) | Err(hasp::Error::NotFound(_)) | Err(hasp::Error::Backend { .. })
+            ),
+            "unexpected error: {result:?}"
+        );
+    }
+
+    #[test]
+    fn bw_exists() {
+        if !bw_available() {
+            return;
+        }
+
+        let _lock = ENV_LOCK.lock().unwrap();
+        let store = Store::with_defaults();
+
+        let result = store.exists("bw://test-item/field.path");
+        assert!(
+            matches!(
+                result,
+                Ok(_) | Err(hasp::Error::NotFound(_)) | Err(hasp::Error::Backend { .. })
+            ),
+            "unexpected error: {result:?}"
+        );
+    }
+
+    #[test]
+    fn bw_not_found() {
+        if !bw_available() {
+            return;
+        }
+
+        let _lock = ENV_LOCK.lock().unwrap();
+        let store = Store::with_defaults();
+
+        let err = store
+            .get("bw://nonexistent-item/login.password")
+            .unwrap_err();
+
+        assert!(
+            matches!(err, hasp::Error::NotFound(_) | hasp::Error::Backend { .. }),
+            "expected NotFound or Backend error for a missing item, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn bw_not_authenticated() {
+        if !bw_available() {
+            return;
+        }
+
+        let _lock = ENV_LOCK.lock().unwrap();
+
+        let old_session = std::env::var("BW_SESSION").ok();
+        std::env::remove_var("BW_SESSION");
+
+        let store = Store::with_defaults();
+        let err = store.get("bw://item/field.path").unwrap_err();
+
+        if let Some(v) = old_session {
+            std::env::set_var("BW_SESSION", v);
+        }
+
+        assert!(
+            matches!(err, hasp::Error::AuthenticationFailed(_)),
+            "expected AuthenticationFailed when no ambient credentials are present, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn bw_unsupported_operations() {
+        let store = Store::with_defaults();
+        let url = "bw://item/field.path";
+        let secret = hasp::SecretString::new("x".into());
+
+        assert!(matches!(
+            store.put(url, &secret),
+            Err(hasp::Error::UnsupportedOperation {
+                scheme: "bw",
+                operation: "put",
+            })
+        ));
+        assert!(matches!(
+            store.list(url),
+            Err(hasp::Error::UnsupportedOperation {
+                scheme: "bw",
+                operation: "list",
+            })
+        ));
+        assert!(matches!(
+            store.delete(url),
+            Err(hasp::Error::UnsupportedOperation {
+                scheme: "bw",
+                operation: "delete",
+            })
+        ));
+    }
+}
