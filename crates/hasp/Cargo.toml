@@ -21,6 +21,7 @@ bw = ["dep:hasp-backend-bw"]
 aws-sm = ["dep:hasp-backend-aws-sm"]
 aws-ssm = ["dep:hasp-backend-aws-ssm"]
 gcp-sm = ["dep:hasp-backend-gcp-sm"]
+azure-kv = ["dep:hasp-backend-azure-kv"]
 
 [dependencies]
 hasp-core = { path = "../hasp-core" }
@@ -33,6 +34,7 @@ hasp-backend-op = { path = "../hasp-backend-op", optional = true }
 hasp-backend-vault = { path = "../hasp-backend-vault", optional = true }
 hasp-backend-bw = { path = "../hasp-backend-bw", optional = true }
 hasp-backend-gcp-sm = { path = "../hasp-backend-gcp-sm", optional = true }
+hasp-backend-azure-kv = { path = "../hasp-backend-azure-kv", optional = true }
 url = "2.5"
 
 [dev-dependencies]

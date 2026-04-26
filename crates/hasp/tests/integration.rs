@@ -834,12 +834,10 @@ mod gcp_sm_disabled_tests {
     fn gcp_sm_unknown_when_disabled() {
         let store = Store::with_defaults();
         let err = store.get("gcp-sm://my-project/my-secret").unwrap_err();
-        assert!(
-            matches!(
-                err,
-                hasp::Error::UnknownScheme(ref s) if s == "gcp-sm"
-            )
-        );
+        assert!(matches!(
+            err,
+            hasp::Error::UnknownScheme(ref s) if s == "gcp-sm"
+        ));
     }
 }
 
@@ -933,6 +931,117 @@ mod gcp_sm_tests {
             store.delete(url),
             Err(hasp::Error::UnsupportedOperation {
                 scheme: "gcp-sm",
+                operation: "delete",
+            })
+        ));
+    }
+}
+
+#[cfg(not(feature = "azure-kv"))]
+mod azure_kv_disabled_tests {
+    use super::*;
+
+    #[test]
+    fn azure_kv_unknown_when_disabled() {
+        let store = Store::with_defaults();
+        let err = store.get("azure-kv://my-vault/my-secret").unwrap_err();
+        assert!(matches!(
+            err,
+            hasp::Error::UnknownScheme(ref s) if s == "azure-kv"
+        ));
+    }
+}
+
+#[cfg(feature = "azure-kv")]
+mod azure_kv_tests {
+    use super::*;
+
+    fn azure_kv_available() -> bool {
+        std::env::var("AZURE_CLIENT_ID").is_ok() && std::env::var("AZURE_CLIENT_SECRET").is_ok()
+    }
+
+    #[test]
+    fn azure_kv_get_roundtrip() {
+        if !azure_kv_available() {
+            return;
+        }
+
+        let _lock = ENV_LOCK.lock().unwrap();
+        let store = Store::with_defaults();
+
+        let result = store.get("azure-kv://my-vault/hasp-test-secret");
+        assert!(
+            matches!(
+                result,
+                Ok(_) | Err(hasp::Error::NotFound(_)) | Err(hasp::Error::Backend { .. })
+            ),
+            "unexpected error: {result:?}"
+        );
+    }
+
+    #[test]
+    fn azure_kv_exists() {
+        if !azure_kv_available() {
+            return;
+        }
+
+        let _lock = ENV_LOCK.lock().unwrap();
+        let store = Store::with_defaults();
+
+        let result = store.exists("azure-kv://my-vault/hasp-test-secret");
+        assert!(
+            matches!(
+                result,
+                Ok(_) | Err(hasp::Error::NotFound(_)) | Err(hasp::Error::Backend { .. })
+            ),
+            "unexpected error: {result:?}"
+        );
+    }
+
+    #[test]
+    fn azure_kv_not_found() {
+        if !azure_kv_available() {
+            return;
+        }
+
+        let _lock = ENV_LOCK.lock().unwrap();
+        let store = Store::with_defaults();
+
+        let err = store
+            .get("azure-kv://my-vault/hasp-test-nonexistent/not-real")
+            .unwrap_err();
+
+        assert!(
+            matches!(err, hasp::Error::NotFound(_) | hasp::Error::Backend { .. }),
+            "expected NotFound or Backend error for a missing secret, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn azure_kv_unsupported_operations() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let store = Store::with_defaults();
+        let url = "azure-kv://my-vault/hasp-test-secret";
+        let secret = hasp::SecretString::new("x".into());
+
+        assert!(matches!(
+            store.put(url, &secret),
+            Err(hasp::Error::UnsupportedOperation {
+                scheme: "azure-kv",
+                operation: "put",
+            })
+        ));
+        assert!(matches!(
+            store.list(url),
+            Err(hasp::Error::UnsupportedOperation {
+                scheme: "azure-kv",
+                operation: "list",
+            })
+        ));
+        assert!(matches!(
+            store.delete(url),
+            Err(hasp::Error::UnsupportedOperation {
+                scheme: "azure-kv",
                 operation: "delete",
             })
         ));

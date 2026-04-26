@@ -9,6 +9,7 @@
 //! - `env://VAR_NAME` — environment variables (feature `env`)
 //! - `file:///path/to/secret` — local files (feature `file`)
 //! - `gcp-sm://project/secret-id?version=3` — Google Cloud Secret Manager (feature `gcp-sm`)
+//! - `azure-kv://vault/secret-name?version=3` — Azure Key Vault (feature `azure-kv`)
 //! - `keyring://service/account` — OS keyring (feature `keyring`)
 //! - `op://vault/item/field` — 1Password CLI (feature `op`)
 //! - `vault://mount/path?field=key` — HashiCorp Vault (feature `vault`)
@@ -62,6 +63,9 @@ pub use hasp_backend_bw::BwBackend;
 #[cfg(feature = "gcp-sm")]
 pub use hasp_backend_gcp_sm::GcpSmBackend;
 
+#[cfg(feature = "azure-kv")]
+pub use hasp_backend_azure_kv::AzureKvBackend;
+
 use std::collections::HashMap;
 use std::sync::Arc;
 use url::Url;
@@ -107,6 +111,10 @@ pub enum Backend {
     #[cfg(feature = "gcp-sm")]
     GcpSm(GcpSmBackend),
 
+    /// Azure Key Vault REST backend (`azure-kv://`).
+    #[cfg(feature = "azure-kv")]
+    AzureKv(AzureKvBackend),
+
     /// Dynamically-registered backend.
     Custom(Arc<dyn CustomBackend>),
 }
@@ -133,6 +141,8 @@ impl Backend {
             Backend::Bw(_) => "bw",
             #[cfg(feature = "gcp-sm")]
             Backend::GcpSm(_) => "gcp-sm",
+            #[cfg(feature = "azure-kv")]
+            Backend::AzureKv(_) => "azure-kv",
             Backend::Custom(b) => b.scheme(),
         }
     }
@@ -157,6 +167,8 @@ impl Backend {
             Backend::Bw(b) => b.get(url),
             #[cfg(feature = "gcp-sm")]
             Backend::GcpSm(b) => b.get(url),
+            #[cfg(feature = "azure-kv")]
+            Backend::AzureKv(b) => b.get(url),
             Backend::Custom(b) => b.get(url),
         }
     }
@@ -181,6 +193,8 @@ impl Backend {
             Backend::Bw(b) => b.put(url, value),
             #[cfg(feature = "gcp-sm")]
             Backend::GcpSm(b) => b.put(url, value),
+            #[cfg(feature = "azure-kv")]
+            Backend::AzureKv(b) => b.put(url, value),
             Backend::Custom(b) => b.put(url, value),
         }
     }
@@ -205,6 +219,8 @@ impl Backend {
             Backend::Bw(b) => b.list(url),
             #[cfg(feature = "gcp-sm")]
             Backend::GcpSm(b) => b.list(url),
+            #[cfg(feature = "azure-kv")]
+            Backend::AzureKv(b) => b.list(url),
             Backend::Custom(b) => b.list(url),
         }
     }
@@ -229,6 +245,8 @@ impl Backend {
             Backend::Bw(b) => b.delete(url),
             #[cfg(feature = "gcp-sm")]
             Backend::GcpSm(b) => b.delete(url),
+            #[cfg(feature = "azure-kv")]
+            Backend::AzureKv(b) => b.delete(url),
             Backend::Custom(b) => b.delete(url),
         }
     }
@@ -253,6 +271,8 @@ impl Backend {
             Backend::Bw(b) => b.exists(url),
             #[cfg(feature = "gcp-sm")]
             Backend::GcpSm(b) => b.exists(url),
+            #[cfg(feature = "azure-kv")]
+            Backend::AzureKv(b) => b.exists(url),
             Backend::Custom(b) => b.exists(url),
         }
     }
@@ -315,6 +335,10 @@ impl Store {
         #[cfg(feature = "gcp-sm")]
         {
             backends.insert("gcp-sm", Backend::GcpSm(GcpSmBackend::new()));
+        }
+        #[cfg(feature = "azure-kv")]
+        {
+            backends.insert("azure-kv", Backend::AzureKv(AzureKvBackend::new()));
         }
         Self { backends }
     }
