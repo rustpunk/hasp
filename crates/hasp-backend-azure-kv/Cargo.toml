@@ -1,0 +1,18 @@
+[package]
+name = "hasp-backend-azure-kv"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "azure-kv:// backend for hasp — Azure Key Vault REST client."
+
+[dependencies]
+hasp-core = { path = "../hasp-core" }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "blocking"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt"] }
+url = "2.5"
+azure_identity = "0.21"
+azure_core = "0.21"
