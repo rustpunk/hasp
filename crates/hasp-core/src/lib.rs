@@ -79,6 +79,7 @@ pub trait CustomBackend: Send + Sync {
 ///
 /// `name` is the human-readable identifier; `url` is the canonical
 /// address that can be passed back to `Store::get`.
+#[derive(Debug, Clone)]
 pub struct Entry {
     pub name: String,
     pub url: Url,

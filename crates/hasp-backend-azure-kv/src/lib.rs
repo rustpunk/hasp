@@ -5,15 +5,14 @@
 //!   - `<secret-name>` — Path segment after the host. Must be non-empty.
 //!   - `?version`      — Optional version string. Defaults to latest (empty).
 //!
-//! Supported operations: `get`, `exists`.
-//! `put`, `list`, `delete`: `UnsupportedOperation`.
+//! Supported operations: `get`, `put`, `list`, `delete`, `exists`.
 //!
 //! Authentication is ambient only. `azure_identity::create_credential`
 //! resolves the standard Azure credential chain (service principal env vars,
 //! managed identity, Azure CLI) transparently. No auth-bootstrap flows or
 //! token refresh logic lives in this crate.
 
-use hasp_core::{Backend, BackendFailureKind, Entry, Error, SecretString};
+use hasp_core::{Backend, BackendFailureKind, Entry, Error, ExposeSecret, SecretString};
 use serde::Deserialize;
 use std::time::Duration;
 use url::Url;
@@ -48,11 +47,6 @@ impl TryFrom<&Url> for AzureKvUrl {
         }
 
         let secret_name = url.path().trim_start_matches('/').to_owned();
-        if secret_name.is_empty() {
-            return Err(Error::InvalidUrl(
-                "azure-kv:// secret name must not be empty".into(),
-            ));
-        }
 
         let mut version = None;
         for (k, v) in url.query_pairs() {
@@ -178,6 +172,24 @@ impl AzureKvBackend {
             Self::API_VERSION,
         )
     }
+
+    /// Ensure the secret name extracted from the URL is non-empty.
+    fn ensure_secret_name(url: &AzureKvUrl) -> Result<(), Error> {
+        if url.secret_name.is_empty() {
+            return Err(Error::InvalidUrl(
+                "azure-kv:// secret name must not be empty".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Build the list URL for a given vault.
+    fn build_list_url(&self, vault_name: &str) -> String {
+        format!(
+            "https://{vault_name}.vault.azure.net/secrets?api-version={}",
+            Self::API_VERSION,
+        )
+    }
 }
 
 impl Default for AzureKvBackend {
@@ -193,6 +205,7 @@ impl Backend for AzureKvBackend {
 
     fn get(&self, url: &Url) -> Result<SecretString, Error> {
         let kv_url = AzureKvUrl::try_from(url)?;
+        Self::ensure_secret_name(&kv_url)?;
         let token = self.token()?;
         let request_url = self.build_url(&kv_url);
 
@@ -223,29 +236,107 @@ impl Backend for AzureKvBackend {
         Ok(SecretString::new(value.into()))
     }
 
-    fn put(&self, _url: &Url, _value: &SecretString) -> Result<(), Error> {
-        Err(Error::UnsupportedOperation {
-            scheme: Self::SCHEME,
-            operation: "put",
-        })
+    fn put(&self, url: &Url, value: &SecretString) -> Result<(), Error> {
+        let kv_url = AzureKvUrl::try_from(url)?;
+        Self::ensure_secret_name(&kv_url)?;
+        let token = self.token()?;
+        let request_url = self.build_url(&kv_url);
+
+        let body = serde_json::json!({ "value": value.expose_secret() });
+
+        let client = self.client();
+        let response = client
+            .put(&request_url)
+            .bearer_auth(&token)
+            .json(&body)
+            .send()
+            .map_err(map_reqwest_error)?;
+
+        let status = response.status();
+        if !status.is_success() {
+            return Err(map_http_status(status, url));
+        }
+
+        Ok(())
     }
 
-    fn list(&self, _url: &Url) -> Result<Vec<Entry>, Error> {
-        Err(Error::UnsupportedOperation {
+    fn list(&self, url: &Url) -> Result<Vec<Entry>, Error> {
+        let kv_url = AzureKvUrl::try_from(url)?;
+        let token = self.token()?;
+        let request_url = self.build_list_url(&kv_url.vault_name);
+
+        let client = self.client();
+        let response = client
+            .get(&request_url)
+            .bearer_auth(&token)
+            .send()
+            .map_err(map_reqwest_error)?;
+
+        let status = response.status();
+        if !status.is_success() {
+            return Err(map_http_status(status, url));
+        }
+
+        let payload: SecretListResponse = response.json().map_err(|e| Error::Backend {
             scheme: Self::SCHEME,
-            operation: "list",
-        })
+            kind: BackendFailureKind::Permanent,
+            message: format!("invalid JSON from Azure Key Vault list: {e}"),
+        })?;
+
+        let mut entries = Vec::new();
+        // Extract secret names from full Azure IDs. Each entry id is a URL
+        // like https://vault.vault.azure.net/secrets/name/versions/xxx.
+        // We extract the name component for the canonical hasp URL.
+        for item in payload.value.into_iter().flatten() {
+            // Azure resource IDs look like:
+            // https://vault.vault.azure.net/secrets/name/version
+            // The name is the second-to-last path segment.
+            let segments: Vec<_> = item.id.rsplit('/').collect();
+            let name = if segments.len() >= 2 {
+                segments[1].to_owned()
+            } else {
+                item.id.rsplit('/').next().unwrap_or(&item.id).to_owned()
+            };
+            let entry_url = Url::parse(&format!("azure-kv://{}/{name}", kv_url.vault_name))
+                .map_err(|e| Error::Backend {
+                    scheme: Self::SCHEME,
+                    kind: BackendFailureKind::Permanent,
+                    message: format!("failed to build list entry URL: {e}"),
+                })?;
+            entries.push(Entry {
+                name: name.clone(),
+                url: entry_url,
+            });
+        }
+
+        // List responses are paginated via `nextLink`. Full pagination
+        // following is not implemented in this pass.
+        // Reference: https://docs.microsoft.com/en-us/rest/api/keyvault/get-secrets/get-secrets
+        Ok(entries)
     }
 
-    fn delete(&self, _url: &Url) -> Result<(), Error> {
-        Err(Error::UnsupportedOperation {
-            scheme: Self::SCHEME,
-            operation: "delete",
-        })
+    fn delete(&self, url: &Url) -> Result<(), Error> {
+        let kv_url = AzureKvUrl::try_from(url)?;
+        Self::ensure_secret_name(&kv_url)?;
+        let token = self.token()?;
+        let request_url = self.build_url(&kv_url);
+
+        let client = self.client();
+        let response = client
+            .delete(&request_url)
+            .bearer_auth(&token)
+            .send()
+            .map_err(map_reqwest_error)?;
+
+        match response.status() {
+            reqwest::StatusCode::ACCEPTED | reqwest::StatusCode::NO_CONTENT => Ok(()),
+            status => Err(map_http_status(status, url)),
+        }
     }
 
     fn exists(&self, url: &Url) -> Result<bool, Error> {
         let kv_url = AzureKvUrl::try_from(url)?;
+        Self::ensure_secret_name(&kv_url)?;
         let token = self.token()?;
         let request_url = self.build_url(&kv_url);
 
@@ -270,6 +361,24 @@ impl Backend for AzureKvBackend {
 #[derive(Debug, Deserialize)]
 struct SecretResponse {
     value: Option<String>,
+}
+
+/// Response body from the Azure Key Vault `GetSecrets` (list) endpoint.
+///
+/// `value` is an array of secret identifiers. `nextLink` is the URL for
+/// the next page; pagination following is not implemented in this pass.
+#[derive(Debug, Deserialize)]
+struct SecretListResponse {
+    #[serde(default)]
+    value: Option<Vec<SecretListItem>>,
+}
+
+/// A single secret entry in the Azure Key Vault list response.
+///
+/// `id` is the full Azure resource ID for the secret.
+#[derive(Debug, Deserialize)]
+struct SecretListItem {
+    id: String,
 }
 
 /// Map `reqwest` network errors into the locked `hasp_core::Error` taxonomy.
@@ -310,6 +419,11 @@ fn map_http_status(status: reqwest::StatusCode, url: &Url) -> Error {
             kind: BackendFailureKind::Transient,
             message: format!("Azure Key Vault returned HTTP {status}"),
         },
+        reqwest::StatusCode::CONFLICT => {
+            Error::PreconditionFailed(format!(
+                "azure-kv:// secret is in soft-delete recovery (HTTP {status})"
+            ))
+        }
         status if status.as_u16() == 400 => {
             Error::InvalidUrl(format!("azure-kv:// invalid request (HTTP {status})"))
         }
@@ -358,9 +472,31 @@ mod tests {
     }
 
     #[test]
-    fn parse_empty_vault_name_fails() {
+    fn empty_secret_name_fails_at_api_boundary() {
+        let backend = AzureKvBackend::new();
         let url = Url::parse("azure-kv://my-vault/").unwrap();
-        assert!(AzureKvUrl::try_from(&url).is_err());
+        let dummy = SecretString::new("x".into());
+        assert!(
+            matches!(
+                backend.get(&url),
+                Err(Error::InvalidUrl(ref s)) if s.contains("secret name must not be empty")
+            ),
+            "empty secret name should fail at API boundary"
+        );
+        assert!(
+            matches!(
+                backend.put(&url, &dummy),
+                Err(Error::InvalidUrl(ref s)) if s.contains("secret name must not be empty")
+            ),
+            "empty secret name should fail at API boundary for put"
+        );
+        assert!(
+            matches!(
+                backend.delete(&url),
+                Err(Error::InvalidUrl(ref s)) if s.contains("secret name must not be empty")
+            ),
+            "empty secret name should fail at API boundary for delete"
+        );
     }
 
     #[test]
@@ -462,32 +598,71 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_operations() {
+    fn supported_operations() {
         let backend = AzureKvBackend::new();
         let url = Url::parse("azure-kv://my-vault/my-secret").unwrap();
         let dummy = SecretString::new("x".into());
 
-        assert!(matches!(
-            backend.put(&url, &dummy),
-            Err(Error::UnsupportedOperation {
-                scheme: "azure-kv",
-                operation: "put",
-            })
-        ));
-        assert!(matches!(
-            backend.list(&url),
-            Err(Error::UnsupportedOperation {
-                scheme: "azure-kv",
-                operation: "list",
-            })
-        ));
-        assert!(matches!(
-            backend.delete(&url),
-            Err(Error::UnsupportedOperation {
-                scheme: "azure-kv",
-                operation: "delete",
-            })
-        ));
+        assert!(
+            matches!(
+                backend.put(&url, &dummy),
+                Err(Error::Backend { .. })
+                    | Err(Error::AuthenticationFailed(_))
+                    | Err(Error::NotFound(_))
+            ),
+            "put now supported (fails at network layer): {err:?}",
+            err = backend.put(&url, &dummy).unwrap_err()
+        );
+        assert!(
+            matches!(
+                backend.list(&url),
+                Err(Error::Backend { .. })
+                    | Err(Error::AuthenticationFailed(_))
+                    | Err(Error::NotFound(_))
+            ),
+            "list now supported (fails at network layer): {err:?}",
+            err = backend.list(&url).unwrap_err()
+        );
+        assert!(
+            matches!(
+                backend.delete(&url),
+                Err(Error::Backend { .. })
+                    | Err(Error::AuthenticationFailed(_))
+                    | Err(Error::NotFound(_))
+            ),
+            "delete now supported (fails at network layer): {err:?}",
+            err = backend.delete(&url).unwrap_err()
+        );
+    }
+
+    #[test]
+    fn error_map_409_to_precondition_failed() {
+        let url = Url::parse("azure-kv://my-vault/my-secret").unwrap();
+        let err = map_http_status(reqwest::StatusCode::CONFLICT, &url);
+        assert!(
+            matches!(err, Error::PreconditionFailed(ref s) if s.contains("soft-delete")),
+            "got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn list_parsing_from_json() {
+        let payload: SecretListResponse = serde_json::from_str(
+            r#"{"value":[{"id":"https://my-vault.vault.azure.net/secrets/secret-a/abc123"},{"id":"https://my-vault.vault.azure.net/secrets/secret-b/def456"}]}"#
+        ).unwrap();
+
+        let items = payload.value.unwrap();
+        assert_eq!(items.len(), 2);
+        let segments: Vec<_> = items[0].id.rsplit('/').collect();
+        assert_eq!(segments[1], "secret-a");
+        let segments: Vec<_> = items[1].id.rsplit('/').collect();
+        assert_eq!(segments[1], "secret-b");
+    }
+
+    #[test]
+    fn list_parsing_empty() {
+        let payload: SecretListResponse = serde_json::from_str(r#"{"value":[]}"#).unwrap();
+        assert_eq!(payload.value.unwrap().len(), 0);
     }
 
     #[test]
