@@ -1018,6 +1018,42 @@ mod azure_kv_tests {
     }
 
     #[test]
+    fn azure_kv_not_authenticated() {
+        let _lock = ENV_LOCK.lock().unwrap();
+
+        let vars = [
+            "AZURE_CLIENT_ID",
+            "AZURE_CLIENT_SECRET",
+            "AZURE_TENANT_ID",
+            "AZURE_USERNAME",
+            "AZURE_PASSWORD",
+            "AZURE_FEDERATED_TOKEN",
+            "AZURE_FEDERATED_TOKEN_FILE",
+        ];
+        let old: Vec<Option<String>> = vars.iter().map(|v| std::env::var(v).ok()).collect();
+        for v in &vars {
+            std::env::remove_var(v);
+        }
+
+        let store = Store::with_defaults();
+        let err = store
+            .get("azure-kv://my-vault/nonexistent-secret")
+            .unwrap_err();
+
+        for (i, v) in vars.iter().enumerate() {
+            match &old[i] {
+                Some(val) => std::env::set_var(v, val),
+                None => std::env::remove_var(v),
+            }
+        }
+
+        assert!(
+            matches!(err, hasp::Error::AuthenticationFailed(_)),
+            "expected AuthenticationFailed when no ambient credentials are present, got {err:?}"
+        );
+    }
+
+    #[test]
     fn azure_kv_unsupported_operations() {
         let _lock = ENV_LOCK.lock().unwrap();
         let store = Store::with_defaults();

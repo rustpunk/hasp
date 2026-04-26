@@ -130,20 +130,27 @@ impl AzureKvBackend {
     /// Obtain a fresh access token via the Azure identity credential chain.
     fn token(&self) -> Result<String, Error> {
         self.block_on(async {
-            let credential = azure_identity::create_credential().map_err(|e| Error::Backend {
-                scheme: Self::SCHEME,
-                kind: BackendFailureKind::Permanent,
-                message: format!("failed to discover Azure credentials: {e}"),
+            let credential = azure_identity::create_credential().map_err(|e| {
+                let msg = e.to_string();
+                if msg.to_lowercase().contains("credential") {
+                    Error::AuthenticationFailed(format!(
+                        "no ambient Azure credentials; set AZURE_CLIENT_ID/SECRET/TENANT_ID or log in with Azure CLI: {msg}"
+                    ))
+                } else {
+                    Error::Backend {
+                        scheme: Self::SCHEME,
+                        kind: BackendFailureKind::Permanent,
+                        message: format!("failed to discover Azure credentials: {msg}"),
+                    }
+                }
             })?;
 
             let access_token = credential
                 .get_token(&[Self::TOKEN_SCOPE])
                 .await
-                .map_err(|e| Error::Backend {
-                    scheme: Self::SCHEME,
-                    kind: BackendFailureKind::Permanent,
-                    message: format!("failed to acquire Azure access token: {e}"),
-                })?;
+                .map_err(|e| Error::AuthenticationFailed(format!(
+                    "failed to acquire Azure access token: {e}"
+                )))?;
 
             let bearer = access_token.token.secret().to_string();
             Ok(bearer)
