@@ -374,6 +374,88 @@ fn cli_complete_dynamic_file() {
     );
 }
 
+#[test]
+fn cli_complete_dynamic_env_var() {
+    let _guard = EnvGuard::set("HASP_COMPLETE_TEST_VAR", "test-value");
+
+    let output = hasp()
+        .env("COMPLETE", "bash")
+        .env("_CLAP_COMPLETE_INDEX", "2")
+        .args(["--", "hasp", "get", "env://HASP_COMPLETE"])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "dynamic env completion failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("env://HASP_COMPLETE_TEST_VAR"),
+        "expected env://HASP_COMPLETE_TEST_VAR in completions, got: {stdout}"
+    );
+}
+
+#[test]
+fn cli_man_subcommand() {
+    let output = hasp().args(["man"]).output().unwrap();
+    assert!(
+        output.status.success(),
+        "hasp man failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains(".TH"),
+        "man page should contain .TH header, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("hasp"),
+        "man page should mention hasp, got: {stdout}"
+    );
+}
+
+#[test]
+fn cli_global_flags_in_help() {
+    let output = hasp().arg("--help").output().unwrap();
+    assert!(
+        output.status.success(),
+        "hasp --help failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("--quiet"),
+        "help should show --quiet, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("--verbose"),
+        "help should show --verbose, got: {stdout}"
+    );
+}
+
+#[test]
+fn cli_verbose_flag() {
+    let _guard = EnvGuard::set("HASP_VERBOSE_TEST", "verbose-works");
+    let output = hasp()
+        .args(["get", "-v", "env://HASP_VERBOSE_TEST"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "hasp get -v failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("hasp: get"),
+        "verbose should print operation trace to stderr, got: {stderr}"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(stdout.trim_end(), "verbose-works");
+}
+
 // Guard that sets an environment variable for the duration of a test
 // and restores it afterward.
 struct EnvGuard {

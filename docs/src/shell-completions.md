@@ -46,6 +46,7 @@ Dynamic completions use `clap_complete::CompleteEnv` to call back into
 `hasp` on every tab press. This lets hasp suggest:
 
 - **URL schemes** — `hasp get en<TAB>` → `env://`
+- **Environment variable names** — `hasp get env://<TAB>` → available env vars
 - **Profile aliases** — `hasp get @prod/<TAB>` → keys in the prod
   profile from `profiles.toml`
 - **File paths** — `hasp get file:///tmp/<TAB>` → native filesystem

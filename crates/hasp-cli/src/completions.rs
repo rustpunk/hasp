@@ -28,6 +28,10 @@ pub fn complete_address(current: &OsStr) -> Vec<CompletionCandidate> {
         return complete_file_url(current);
     }
 
+    if current.starts_with("env://") {
+        return complete_env(current);
+    }
+
     complete_schemes(current)
 }
 
@@ -99,6 +103,16 @@ fn complete_file_url(current: &str) -> Vec<CompletionCandidate> {
             let val = c.get_value().to_string_lossy();
             CompletionCandidate::new(format!("{PREFIX}{val}"))
         })
+        .collect()
+}
+
+/// Environment-variable completion inside an `env://` URL.
+fn complete_env(current: &str) -> Vec<CompletionCandidate> {
+    const PREFIX: &str = "env://";
+    let rest = &current[PREFIX.len()..];
+    std::env::vars()
+        .filter(|(k, _)| k.starts_with(rest))
+        .map(|(k, _)| CompletionCandidate::new(format!("{PREFIX}{k}")))
         .collect()
 }
 

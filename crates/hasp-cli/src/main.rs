@@ -1,7 +1,7 @@
-use clap::{CommandFactory, Parser, Subcommand, ValueHint};
+use clap::{ArgAction, CommandFactory, Parser, Subcommand, ValueHint};
 use clap_complete::engine::ArgValueCompleter;
 use secrecy::ExposeSecret;
-use std::io::{self, IsTerminal, Read};
+use std::io::{self, IsTerminal, Read, Write};
 
 mod completions;
 mod profiles;
@@ -15,6 +15,14 @@ mod profiles;
 struct Cli {
     #[command(subcommand)]
     command: Command,
+
+    /// Suppress non-error informational output.
+    #[arg(short, long, global = true)]
+    quiet: bool,
+
+    /// Increase output verbosity (can be used multiple times).
+    #[arg(short, long, global = true, action = ArgAction::Count)]
+    verbose: u8,
 }
 
 #[derive(Subcommand)]
@@ -52,6 +60,11 @@ enum Command {
         #[arg(value_hint = ValueHint::AnyPath, add = ArgValueCompleter::new(completions::complete_address))]
         address: String,
     },
+    /// Generate a man page for the `hasp` binary.
+    ///
+    /// Hidden from help to keep the CLI surface minimal.
+    #[command(hide = true)]
+    Man,
     /// Generate shell completions for the `hasp` binary.
     ///
     /// Hidden from help to keep the CLI surface minimal — completions
@@ -67,29 +80,39 @@ fn main() {
     clap_complete::CompleteEnv::with_factory(Cli::command)
         .complete();
 
-    if let Err(e) = run() {
+    let cli = Cli::parse();
+
+    if let Err(e) = run(cli) {
         eprintln!("{e}");
         std::process::exit(1);
     }
 }
 
-fn run() -> Result<(), String> {
-    let cli = Cli::parse();
+fn run(cli: Cli) -> Result<(), String> {
     let store = hasp::Store::with_defaults();
 
     match cli.command {
         Command::Get { address } => {
+            if cli.verbose > 0 {
+                eprintln!("hasp: get {address}");
+            }
             let url = resolve(&address)?;
             let secret = store.get(&url).map_err(fmt_error)?;
             println!("{}", secret.expose_secret());
         }
         Command::Put { address, value } => {
+            if cli.verbose > 0 {
+                eprintln!("hasp: put {address}");
+            }
             let url = resolve(&address)?;
             let value = read_value(value)?;
             let secret = secrecy::SecretString::new(value.into());
             store.put(&url, &secret).map_err(fmt_error)?;
         }
         Command::List { address } => {
+            if cli.verbose > 0 {
+                eprintln!("hasp: list {address}");
+            }
             let url = resolve(&address)?;
             let entries = store.list(&url).map_err(fmt_error)?;
             for entry in entries {
@@ -97,10 +120,16 @@ fn run() -> Result<(), String> {
             }
         }
         Command::Delete { address } => {
+            if cli.verbose > 0 {
+                eprintln!("hasp: delete {address}");
+            }
             let url = resolve(&address)?;
             store.delete(&url).map_err(fmt_error)?;
         }
         Command::Exists { address } => {
+            if cli.verbose > 0 {
+                eprintln!("hasp: exists {address}");
+            }
             let url = resolve(&address)?;
             let exists = store.exists(&url).map_err(fmt_error)?;
             std::process::exit(if exists { 0 } else { 1 });
@@ -109,6 +138,15 @@ fn run() -> Result<(), String> {
             let mut app = Cli::command();
             let bin_name = app.get_name().to_string();
             clap_complete::aot::generate(shell, &mut app, bin_name, &mut io::stdout());
+        }
+        Command::Man => {
+            let app = Cli::command();
+            let man = clap_mangen::Man::new(app);
+            let mut buf = Vec::new();
+            man.render(&mut buf).map_err(|e| format!("failed to render man page: {e}"))?;
+            if !cli.quiet {
+                io::stdout().write_all(&buf).map_err(|e| format!("failed to write man page: {e}"))?;
+            }
         }
     }
     Ok(())

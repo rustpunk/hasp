@@ -96,11 +96,21 @@ hasp complete fish
 hasp complete powershell
 ```
 
+## `hasp man`
+
+Generate a man page in ROFF format. Hidden from `--help`.
+
+```bash
+hasp man > /usr/share/man/man1/hasp.1
+```
+
 ## Global flags
 
 | Flag | Description |
 |---|---|
 | `-h, --help` | Print help. Pass `-h` for a summary, `--help` for full help. |
+| `-q, --quiet` | Suppress non-error informational output. |
+| `-v, --verbose` | Increase output verbosity; prints operation traces to stderr. Can be used multiple times (`-vv`). |
 
 ## Environment variables
 
