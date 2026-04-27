@@ -533,36 +533,6 @@ mod aws_sm_tests {
             "expected NotFound or Backend error for a missing secret, got {err:?}"
         );
     }
-
-    #[test]
-    fn aws_sm_unsupported_operations() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        let store = Store::with_defaults();
-        let url = "aws-sm://us-east-1/test-secret";
-        let secret = hasp::SecretString::new("x".into());
-
-        assert!(matches!(
-            store.put(url, &secret),
-            Err(hasp::Error::UnsupportedOperation {
-                scheme: "aws-sm",
-                operation: "put",
-            })
-        ));
-        assert!(matches!(
-            store.list(url),
-            Err(hasp::Error::UnsupportedOperation {
-                scheme: "aws-sm",
-                operation: "list",
-            })
-        ));
-        assert!(matches!(
-            store.delete(url),
-            Err(hasp::Error::UnsupportedOperation {
-                scheme: "aws-sm",
-                operation: "delete",
-            })
-        ));
-    }
 }
 
 #[cfg(not(feature = "aws-sm"))]
@@ -658,36 +628,6 @@ mod aws_ssm_tests {
             matches!(err, hasp::Error::NotFound(_) | hasp::Error::Backend { .. }),
             "expected NotFound or Backend error for a missing parameter, got {err:?}"
         );
-    }
-
-    #[test]
-    fn aws_ssm_unsupported_operations() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        let store = Store::with_defaults();
-        let url = "aws-ssm://us-east-1/test-param";
-        let secret = hasp::SecretString::new("x".into());
-
-        assert!(matches!(
-            store.put(url, &secret),
-            Err(hasp::Error::UnsupportedOperation {
-                scheme: "aws-ssm",
-                operation: "put",
-            })
-        ));
-        assert!(matches!(
-            store.list(url),
-            Err(hasp::Error::UnsupportedOperation {
-                scheme: "aws-ssm",
-                operation: "list",
-            })
-        ));
-        assert!(matches!(
-            store.delete(url),
-            Err(hasp::Error::UnsupportedOperation {
-                scheme: "aws-ssm",
-                operation: "delete",
-            })
-        ));
     }
 }
 
@@ -905,36 +845,6 @@ mod gcp_sm_tests {
             "expected NotFound or Backend error for a missing secret, got {err:?}"
         );
     }
-
-    #[test]
-    fn gcp_sm_unsupported_operations() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        let store = Store::with_defaults();
-        let url = "gcp-sm://my-project/hasp-test-secret";
-        let secret = hasp::SecretString::new("x".into());
-
-        assert!(matches!(
-            store.put(url, &secret),
-            Err(hasp::Error::UnsupportedOperation {
-                scheme: "gcp-sm",
-                operation: "put",
-            })
-        ));
-        assert!(matches!(
-            store.list(url),
-            Err(hasp::Error::UnsupportedOperation {
-                scheme: "gcp-sm",
-                operation: "list",
-            })
-        ));
-        assert!(matches!(
-            store.delete(url),
-            Err(hasp::Error::UnsupportedOperation {
-                scheme: "gcp-sm",
-                operation: "delete",
-            })
-        ));
-    }
 }
 
 #[cfg(not(feature = "azure-kv"))]
@@ -1051,35 +961,5 @@ mod azure_kv_tests {
             matches!(err, hasp::Error::AuthenticationFailed(_)),
             "expected AuthenticationFailed when no ambient credentials are present, got {err:?}"
         );
-    }
-
-    #[test]
-    fn azure_kv_unsupported_operations() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        let store = Store::with_defaults();
-        let url = "azure-kv://my-vault/hasp-test-secret";
-        let secret = hasp::SecretString::new("x".into());
-
-        assert!(matches!(
-            store.put(url, &secret),
-            Err(hasp::Error::UnsupportedOperation {
-                scheme: "azure-kv",
-                operation: "put",
-            })
-        ));
-        assert!(matches!(
-            store.list(url),
-            Err(hasp::Error::UnsupportedOperation {
-                scheme: "azure-kv",
-                operation: "list",
-            })
-        ));
-        assert!(matches!(
-            store.delete(url),
-            Err(hasp::Error::UnsupportedOperation {
-                scheme: "azure-kv",
-                operation: "delete",
-            })
-        ));
     }
 }

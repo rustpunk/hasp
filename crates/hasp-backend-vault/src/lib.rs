@@ -139,8 +139,7 @@ impl Backend for VaultBackend {
         // KV v2 paths like /data/myapp/config become myapp (parent dir)
         // for the LIST /v1/{mount}/metadata/{prefix} endpoint.
         let path_str = vault_url.path.trim_start_matches('/');
-        let prefix = if path_str.starts_with("data/") {
-            let after_data = &path_str["data/".len()..];
+        let prefix = if let Some(after_data) = path_str.strip_prefix("data/") {
             after_data.rfind('/').map(|i| &after_data[..i]).unwrap_or("")
         } else {
             path_str.rfind('/').map(|i| &path_str[..i]).unwrap_or("")
