@@ -473,6 +473,7 @@ fn map_reqwest_error(err: reqwest::Error) -> Error {
 ///
 /// Reference:
 /// <https://cloud.google.com/secret-manager/docs/reference/rest/v1/projects.secrets.versions/access>
+// TODO(#4): validate against live GCP project — see notes/TODO-live-error-mapping.md
 fn map_http_status(status: reqwest::StatusCode, url: &Url) -> Error {
     match status {
         reqwest::StatusCode::NOT_FOUND => Error::NotFound(url.to_string()),

@@ -359,6 +359,7 @@ fn map_delete_error(
 }
 
 /// Convert AWS SSM service error metadata into a stable `hasp_core::Error`.
+// TODO(#4): validate against live AWS account — see notes/TODO-live-error-mapping.md
 fn from_service_error(code: &str, message: &str) -> Error {
     match code {
         "ParameterNotFound" | "ParameterVersionNotFound" => {

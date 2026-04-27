@@ -407,6 +407,7 @@ fn map_reqwest_error(err: reqwest::Error) -> Error {
 ///
 /// Reference:
 /// <https://docs.microsoft.com/en-us/rest/api/keyvault/common-error-response>
+// TODO(#4): validate against live Azure subscription — see notes/TODO-live-error-mapping.md
 fn map_http_status(status: reqwest::StatusCode, url: &Url) -> Error {
     match status {
         reqwest::StatusCode::NOT_FOUND => Error::NotFound(url.to_string()),
