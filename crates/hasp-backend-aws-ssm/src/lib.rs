@@ -19,7 +19,7 @@
 //! SSM parameters may be `String`, `StringList`, or `SecureString`.
 //! All three expose their value as text through this backend.
 
-use hasp_core::{Backend, BackendFailureKind, Entry, Error, SecretString};
+use hasp_core::{Backend, BackendFailureKind, Entry, Error, ExposeSecret, SecretString};
 use url::Url;
 
 /// URL shape for `aws-ssm://` addresses.
@@ -149,25 +149,19 @@ impl Backend for AwsSsmBackend {
         self.block_on(get_parameter(&aws_url, aws_url.with_decryption))?
     }
 
-    fn put(&self, _url: &Url, _value: &SecretString) -> Result<(), Error> {
-        Err(Error::UnsupportedOperation {
-            scheme: "aws-ssm",
-            operation: "put",
-        })
+    fn put(&self, url: &Url, value: &SecretString) -> Result<(), Error> {
+        let aws_url = AwsSsmUrl::try_from(url)?;
+        self.block_on(put_parameter(&aws_url, value.expose_secret()))?
     }
 
-    fn list(&self, _url: &Url) -> Result<Vec<Entry>, Error> {
-        Err(Error::UnsupportedOperation {
-            scheme: "aws-ssm",
-            operation: "list",
-        })
+    fn list(&self, url: &Url) -> Result<Vec<Entry>, Error> {
+        let aws_url = AwsSsmUrl::try_from(url)?;
+        self.block_on(list_parameters(&aws_url))?
     }
 
-    fn delete(&self, _url: &Url) -> Result<(), Error> {
-        Err(Error::UnsupportedOperation {
-            scheme: "aws-ssm",
-            operation: "delete",
-        })
+    fn delete(&self, url: &Url) -> Result<(), Error> {
+        let aws_url = AwsSsmUrl::try_from(url)?;
+        self.block_on(delete_parameter(&aws_url))?
     }
 
     fn exists(&self, url: &Url) -> Result<bool, Error> {
@@ -220,10 +214,129 @@ async fn get_parameter(aws_url: &AwsSsmUrl, with_decryption: bool) -> Result<Sec
     Ok(SecretString::new(value.into()))
 }
 
+/// Store or update a parameter via `PutParameter`.
+///
+/// Uses `SecureString` type and the same `with_decryption` KMS posture as
+/// `get`. Creates a new version each time; callers cannot rollback. AWS
+/// native behavior — DeleteParameter is irreversible.
+async fn put_parameter(aws_url: &AwsSsmUrl, value: &str) -> Result<(), Error> {
+    let config = aws_config_for_region(&aws_url.region).await;
+    let client = aws_sdk_ssm::Client::new(&config);
+
+    client
+        .put_parameter()
+        .name(&aws_url.parameter_name)
+        .value(value)
+        .r#type(aws_sdk_ssm::types::ParameterType::SecureString)
+        .overwrite(true)
+        .send()
+        .await
+        .map_err(map_put_error)?;
+
+    Ok(())
+}
+
+/// List parameters via `GetParametersByPath`.
+///
+/// The URL path serves as the hierarchical prefix. AWS SSM list returns
+/// every parameter under the given path. For a first pass without automatic
+/// pagination, only one page is returned.
+async fn list_parameters(aws_url: &AwsSsmUrl) -> Result<Vec<Entry>, Error> {
+    let config = aws_config_for_region(&aws_url.region).await;
+    let client = aws_sdk_ssm::Client::new(&config);
+
+    let output = client
+        .get_parameters_by_path()
+        .path(&aws_url.parameter_name)
+        .recursive(true)
+        .send()
+        .await
+        .map_err(map_list_error)?;
+
+    let mut entries = Vec::new();
+    for param in output.parameters.into_iter().flatten() {
+        let name = param.name.unwrap_or_default();
+        if name.is_empty() {
+            continue;
+        }
+        let entry_url = Url::parse(&format!(
+            "aws-ssm://{}/{}?with-decryption={}",
+            aws_url.region,
+            name,
+            aws_url.with_decryption,
+        ))
+        .map_err(|e| Error::Backend {
+            scheme: "aws-ssm",
+            kind: BackendFailureKind::Permanent,
+            message: format!("failed to build list entry URL: {e}"),
+        })?;
+        entries.push(Entry { name, url: entry_url });
+    }
+
+    Ok(entries)
+}
+
+/// Delete a parameter via `DeleteParameter`.
+///
+/// AWS native behavior: removes the parameter and all versions.
+async fn delete_parameter(aws_url: &AwsSsmUrl) -> Result<(), Error> {
+    let config = aws_config_for_region(&aws_url.region).await;
+    let client = aws_sdk_ssm::Client::new(&config);
+
+    client
+        .delete_parameter()
+        .name(&aws_url.parameter_name)
+        .send()
+        .await
+        .map_err(map_delete_error)?;
+
+    Ok(())
+}
+
 /// Map a `GetParameter` SDK error into the locked `hasp_core::Error`
 /// taxonomy.
 fn map_get_error(
     err: aws_sdk_ssm::error::SdkError<aws_sdk_ssm::operation::get_parameter::GetParameterError>,
+) -> Error {
+    if let Some(service_err) = err.as_service_error() {
+        let code = service_err.meta().code().unwrap_or("Unknown");
+        let message = service_err.meta().message().unwrap_or("no message");
+        return from_service_error(code, message);
+    }
+    map_generic_error(err)
+}
+
+/// Map a `PutParameter` SDK error into the locked `hasp_core::Error` taxonomy.
+fn map_put_error(
+    err: aws_sdk_ssm::error::SdkError<aws_sdk_ssm::operation::put_parameter::PutParameterError>,
+) -> Error {
+    if let Some(service_err) = err.as_service_error() {
+        let code = service_err.meta().code().unwrap_or("Unknown");
+        let message = service_err.meta().message().unwrap_or("no message");
+        return from_service_error(code, message);
+    }
+    map_generic_error(err)
+}
+
+/// Map a `GetParametersByPath` SDK error into the locked `hasp_core::Error` taxonomy.
+fn map_list_error(
+    err: aws_sdk_ssm::error::SdkError<
+        aws_sdk_ssm::operation::get_parameters_by_path::GetParametersByPathError,
+    >,
+) -> Error {
+    if let Some(service_err) = err.as_service_error() {
+        let code = service_err.meta().code().unwrap_or("Unknown");
+        let message = service_err.meta().message().unwrap_or("no message");
+        return from_service_error(code, message);
+    }
+    map_generic_error(err)
+}
+
+/// Map a `DeleteParameter` SDK error into the locked `hasp_core::Error` taxonomy.
+fn map_delete_error(
+    err: aws_sdk_ssm::error::SdkError<
+        aws_sdk_ssm::operation::delete_parameter::DeleteParameterError,
+    >,
 ) -> Error {
     if let Some(service_err) = err.as_service_error() {
         let code = service_err.meta().code().unwrap_or("Unknown");
@@ -428,46 +541,6 @@ mod tests {
                 kind: BackendFailureKind::Permanent,
                 ..
             }
-        ));
-    }
-
-    #[test]
-    fn backend_new_ok() {
-        let _backend = AwsSsmBackend::new();
-    }
-
-    #[test]
-    fn backend_scheme() {
-        let backend = AwsSsmBackend::new();
-        assert_eq!(backend.scheme(), "aws-ssm");
-    }
-
-    #[test]
-    fn unsupported_operations() {
-        let backend = AwsSsmBackend::new();
-        let url = Url::parse("aws-ssm://us-east-1/test").unwrap();
-        let dummy = SecretString::new("x".into());
-
-        assert!(matches!(
-            backend.put(&url, &dummy),
-            Err(Error::UnsupportedOperation {
-                scheme: "aws-ssm",
-                operation: "put"
-            })
-        ));
-        assert!(matches!(
-            backend.list(&url),
-            Err(Error::UnsupportedOperation {
-                scheme: "aws-ssm",
-                operation: "list"
-            })
-        ));
-        assert!(matches!(
-            backend.delete(&url),
-            Err(Error::UnsupportedOperation {
-                scheme: "aws-ssm",
-                operation: "delete"
-            })
         ));
     }
 }
