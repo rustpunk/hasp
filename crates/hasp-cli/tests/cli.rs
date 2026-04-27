@@ -456,6 +456,28 @@ fn cli_verbose_flag() {
     assert_eq!(stdout.trim_end(), "verbose-works");
 }
 
+#[test]
+fn cli_quiet_flag_overrides_verbose() {
+    let _guard = EnvGuard::set("HASP_QUIET_TEST", "quiet-works");
+    let output = hasp()
+        .args(["get", "-q", "-v", "env://HASP_QUIET_TEST"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "hasp get -q -v failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // stderr should be empty because -q suppresses -v traces
+    assert!(
+        output.stderr.is_empty(),
+        "quiet should suppress verbose traces, got stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(stdout.trim_end(), "quiet-works");
+}
+
 // Guard that sets an environment variable for the duration of a test
 // and restores it afterward.
 struct EnvGuard {

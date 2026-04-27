@@ -1,0 +1,77 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            asset: hasp-linux-x64
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            asset: hasp-macos-x64
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            asset: hasp-macos-arm64
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            asset: hasp-windows-x64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release --bin hasp --target ${{ matrix.target }}
+
+      - name: Package (unix)
+        if: matrix.os != 'windows-latest'
+        run: |
+          mkdir -p dist
+          tar czf "dist/${{ matrix.asset }}.tar.gz" -C "target/${{ matrix.target }}/release" hasp
+      - name: Package (windows)
+        if: matrix.os == 'windows-latest'
+        run: |
+          mkdir dist
+          Compress-Archive -Path "target/${{ matrix.target }}/release/hasp.exe" -DestinationPath "dist/${{ matrix.asset }}.zip"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: dist/*
+
+      - name: Upload release asset (unix)
+        if: matrix.os != 'windows-latest'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/${{ matrix.asset }}.tar.gz
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload release asset (windows)
+        if: matrix.os == 'windows-latest'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/${{ matrix.asset }}.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

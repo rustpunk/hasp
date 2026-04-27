@@ -93,7 +93,7 @@ fn run(cli: Cli) -> Result<(), String> {
 
     match cli.command {
         Command::Get { address } => {
-            if cli.verbose > 0 {
+            if cli.verbose > 0 && !cli.quiet {
                 eprintln!("hasp: get {address}");
             }
             let url = resolve(&address)?;
@@ -101,7 +101,7 @@ fn run(cli: Cli) -> Result<(), String> {
             println!("{}", secret.expose_secret());
         }
         Command::Put { address, value } => {
-            if cli.verbose > 0 {
+            if cli.verbose > 0 && !cli.quiet {
                 eprintln!("hasp: put {address}");
             }
             let url = resolve(&address)?;
@@ -110,7 +110,7 @@ fn run(cli: Cli) -> Result<(), String> {
             store.put(&url, &secret).map_err(fmt_error)?;
         }
         Command::List { address } => {
-            if cli.verbose > 0 {
+            if cli.verbose > 0 && !cli.quiet {
                 eprintln!("hasp: list {address}");
             }
             let url = resolve(&address)?;
@@ -120,14 +120,14 @@ fn run(cli: Cli) -> Result<(), String> {
             }
         }
         Command::Delete { address } => {
-            if cli.verbose > 0 {
+            if cli.verbose > 0 && !cli.quiet {
                 eprintln!("hasp: delete {address}");
             }
             let url = resolve(&address)?;
             store.delete(&url).map_err(fmt_error)?;
         }
         Command::Exists { address } => {
-            if cli.verbose > 0 {
+            if cli.verbose > 0 && !cli.quiet {
                 eprintln!("hasp: exists {address}");
             }
             let url = resolve(&address)?;
