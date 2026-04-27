@@ -1549,7 +1549,6 @@ dependencies = [
 name = "hasp-cli"
 version = "0.1.0-alpha"
 dependencies = [
- "anyhow",
  "clap",
  "clap_complete",
  "clap_mangen",
@@ -1558,6 +1557,7 @@ dependencies = [
  "rpassword",
  "secrecy",
  "serde",
+ "serde_json",
  "tempfile",
  "toml",
  "url",

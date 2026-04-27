@@ -57,9 +57,16 @@ List entries matching a URL prefix or alias.
 
 ```bash
 hasp list vault://127.0.0.1/secret/
+hasp list --format json vault://127.0.0.1/secret/ | jq '.[].name'
 ```
 
-- **Output:** One line per entry: `name  url`.
+- **Arguments:**
+  - `address` — URL or alias of the collection to list.
+  - `--format` — Output style:
+    - `plain` (default) — `name  url`, two-space separated
+    - `table` — aligned columns, human-readable
+    - `json` — compact JSON array of `{"name": "...", "url": "..."}` objects
+- **Output:** Lines of entries, or an empty result when none match.
 - **Exit code:** 0 on success, non-zero if the backend does not
   support `list`.
 

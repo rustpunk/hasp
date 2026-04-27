@@ -27,7 +27,7 @@
 //! let secret = store.get("env://HOME").unwrap();
 //! ```
 //!
-//! The library boundary type for secret values is [`secrecy::SecretString`].
+//! The library boundary type for secret values is `secrecy::SecretString`.
 //! Backends wrap raw bytes at the earliest possible moment so `Debug`
 //! output never leaks secret values.
 
@@ -288,6 +288,25 @@ pub struct Store {
 }
 
 impl Store {
+    /// Create an empty store with no backends registered.
+    pub fn empty() -> Self {
+        Self {
+            backends: HashMap::new(),
+        }
+    }
+
+    /// Create a store with the given backends.
+    ///
+    /// Backends are registered in iteration order; later backends with the
+    /// same scheme replace earlier ones.
+    pub fn with_backends(backends: impl IntoIterator<Item = Backend>) -> Self {
+        let mut store = Self::empty();
+        for backend in backends {
+            store.register(backend);
+        }
+        store
+    }
+
     /// Create a store with all default backends registered.
     ///
     /// Which backends are available depends on Cargo features:
@@ -442,4 +461,29 @@ impl Store {
             .ok_or_else(|| Error::UnknownScheme(scheme.to_owned()))?;
         backend.exists(&url)
     }
+}
+
+/// Fetch a secret using a default `Store`.
+pub fn get(url: &str) -> Result<SecretString, Error> {
+    Store::with_defaults().get(url)
+}
+
+/// Store a secret using a default `Store`.
+pub fn put(url: &str, value: &SecretString) -> Result<(), Error> {
+    Store::with_defaults().put(url, value)
+}
+
+/// List entries using a default `Store`.
+pub fn list(url: &str) -> Result<Vec<Entry>, Error> {
+    Store::with_defaults().list(url)
+}
+
+/// Delete a secret using a default `Store`.
+pub fn delete(url: &str) -> Result<(), Error> {
+    Store::with_defaults().delete(url)
+}
+
+/// Check whether a secret exists using a default `Store`.
+pub fn exists(url: &str) -> Result<bool, Error> {
+    Store::with_defaults().exists(url)
 }

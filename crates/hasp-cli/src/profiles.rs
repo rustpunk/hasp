@@ -136,10 +136,7 @@ mod tests {
         inner.insert("foo".into(), profile);
 
         let profiles = Profiles { inner };
-        assert_eq!(
-            profiles.resolve("foo"),
-            Some("file:///etc/foo".into())
-        );
+        assert_eq!(profiles.resolve("foo"), Some("file:///etc/foo".into()));
     }
 
     #[test]
@@ -183,7 +180,13 @@ db_password = "env://DB_PASSWORD"
         let raw: RawProfiles = toml::from_str(input).unwrap();
         assert_eq!(raw.profiles.len(), 2);
         let prod = raw.profiles.get("prod").unwrap();
-        assert_eq!(prod.get("db_password").unwrap(), "aws-sm://us-east-1/prod/db-password");
-        assert_eq!(prod.get("api_key").unwrap(), "op://Production/API/credential");
+        assert_eq!(
+            prod.get("db_password").unwrap(),
+            "aws-sm://us-east-1/prod/db-password"
+        );
+        assert_eq!(
+            prod.get("api_key").unwrap(),
+            "op://Production/API/credential"
+        );
     }
 }

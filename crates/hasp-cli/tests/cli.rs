@@ -194,8 +194,23 @@ fn cli_delete_file() {
 
 #[test]
 fn cli_list_unsupported() {
+    let output = hasp().args(["list", "env://HOME"]).output().unwrap();
+
+    assert!(
+        !output.status.success(),
+        "hasp list unsupported should fail"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("does not support list"),
+        "expected unsupported operation in stderr, got: {stderr}"
+    );
+}
+
+#[test]
+fn cli_list_unsupported_plain() {
     let output = hasp()
-        .args(["list", "env://HOME"])
+        .args(["list", "--format", "plain", "env://HOME"])
         .output()
         .unwrap();
 
@@ -211,16 +226,150 @@ fn cli_list_unsupported() {
 }
 
 #[test]
-fn cli_unknown_scheme() {
+fn cli_list_unsupported_json() {
     let output = hasp()
-        .args(["get", "unknown://thing"])
+        .args(["list", "--format", "json", "env://HOME"])
         .output()
         .unwrap();
 
     assert!(
         !output.status.success(),
-        "hasp get unknown:// should fail"
+        "hasp list unsupported should fail"
     );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("does not support list"),
+        "expected unsupported operation in stderr, got: {stderr}"
+    );
+}
+
+#[test]
+fn cli_list_unsupported_table() {
+    let output = hasp()
+        .args(["list", "--format", "table", "env://HOME"])
+        .output()
+        .unwrap();
+
+    assert!(
+        !output.status.success(),
+        "hasp list unsupported should fail"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("does not support list"),
+        "expected unsupported operation in stderr, got: {stderr}"
+    );
+}
+
+#[test]
+fn cli_list_help_shows_format_flag() {
+    let output = hasp().args(["list", "--help"]).output().unwrap();
+    assert!(
+        output.status.success(),
+        "hasp list --help failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("--format"),
+        "list help should show --format, got: {stdout}"
+    );
+}
+
+fn vault_available() -> bool {
+    std::env::var("VAULT_ADDR").is_ok() && std::env::var("VAULT_TOKEN").is_ok()
+}
+
+#[test]
+fn cli_list_vault_json_when_available() {
+    if !vault_available() {
+        return;
+    }
+
+    let output = hasp()
+        .args([
+            "list",
+            "--format",
+            "json",
+            "vault://secret/data/hasp-cli-test",
+        ])
+        .output()
+        .unwrap();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        output.status.success()
+            || stderr.contains("not found")
+            || stderr.contains("authentication"),
+        "unexpected failure: {stderr}"
+    );
+
+    if output.status.success() {
+        let parsed: serde_json::Value = serde_json::from_str(&stdout)
+            .unwrap_or_else(|_| panic!("stdout was not valid JSON: {stdout}"));
+        assert!(parsed.is_array(), "expected JSON array, got: {parsed}");
+    }
+}
+
+#[test]
+fn cli_list_vault_plain_when_available() {
+    if !vault_available() {
+        return;
+    }
+
+    let output = hasp()
+        .args([
+            "list",
+            "--format",
+            "plain",
+            "vault://secret/data/hasp-cli-test",
+        ])
+        .output()
+        .unwrap();
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        output.status.success()
+            || stderr.contains("not found")
+            || stderr.contains("authentication"),
+        "unexpected failure: {stderr}"
+    );
+}
+
+#[test]
+fn cli_list_vault_table_when_available() {
+    if !vault_available() {
+        return;
+    }
+
+    let output = hasp()
+        .args([
+            "list",
+            "--format",
+            "table",
+            "vault://secret/data/hasp-cli-test",
+        ])
+        .output()
+        .unwrap();
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        output.status.success()
+            || stderr.contains("not found")
+            || stderr.contains("authentication"),
+        "unexpected failure: {stderr}"
+    );
+}
+
+#[test]
+fn cli_unknown_scheme() {
+    let output = hasp().args(["get", "unknown://thing"]).output().unwrap();
+
+    assert!(!output.status.success(), "hasp get unknown:// should fail");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("unsupported scheme"),

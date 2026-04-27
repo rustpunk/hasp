@@ -79,7 +79,7 @@ public library API. Both are first-class surfaces.
 
 `0.1.0-alpha` — all five CRUD verbs (`get` / `put` / `list` / `delete` /
 `exists`) are implemented across every backend. The CLI is functional.
-Library API is stabilising before a `0.1.0` release.
+Library API is stabilized before a `0.1.0` release.
 
 ## License
 

@@ -4,7 +4,9 @@ use secrecy::ExposeSecret;
 use std::io::{self, IsTerminal, Read, Write};
 
 mod completions;
+mod list_format;
 mod profiles;
+use list_format::{format_list, Format};
 
 /// Unified secrets CLI.
 ///
@@ -47,6 +49,9 @@ enum Command {
         /// URL or alias (`@profile`) to list.
         #[arg(value_hint = ValueHint::AnyPath, add = ArgValueCompleter::new(completions::complete_address))]
         address: String,
+        /// Output format for list entries.
+        #[arg(short, long, value_enum, default_value = "plain")]
+        format: Format,
     },
     /// Delete a secret.
     Delete {
@@ -77,8 +82,7 @@ enum Command {
 }
 
 fn main() {
-    clap_complete::CompleteEnv::with_factory(Cli::command)
-        .complete();
+    clap_complete::CompleteEnv::with_factory(Cli::command).complete();
 
     let cli = Cli::parse();
 
@@ -109,14 +113,15 @@ fn run(cli: Cli) -> Result<(), String> {
             let secret = secrecy::SecretString::new(value.into());
             store.put(&url, &secret).map_err(fmt_error)?;
         }
-        Command::List { address } => {
+        Command::List { address, format } => {
             if cli.verbose > 0 && !cli.quiet {
                 eprintln!("hasp: list {address}");
             }
             let url = resolve(&address)?;
             let entries = store.list(&url).map_err(fmt_error)?;
-            for entry in entries {
-                println!("{}  {}", entry.name, entry.url);
+            let output = format_list(&entries, format)?;
+            if !output.is_empty() {
+                println!("{output}");
             }
         }
         Command::Delete { address } => {
@@ -143,9 +148,12 @@ fn run(cli: Cli) -> Result<(), String> {
             let app = Cli::command();
             let man = clap_mangen::Man::new(app);
             let mut buf = Vec::new();
-            man.render(&mut buf).map_err(|e| format!("failed to render man page: {e}"))?;
+            man.render(&mut buf)
+                .map_err(|e| format!("failed to render man page: {e}"))?;
             if !cli.quiet {
-                io::stdout().write_all(&buf).map_err(|e| format!("failed to write man page: {e}"))?;
+                io::stdout()
+                    .write_all(&buf)
+                    .map_err(|e| format!("failed to write man page: {e}"))?;
             }
         }
     }
@@ -158,7 +166,8 @@ fn run(cli: Cli) -> Result<(), String> {
 /// Otherwise return it unchanged, validating that it looks like a URL.
 fn resolve(address: &str) -> Result<String, String> {
     if let Some(rest) = address.strip_prefix('@') {
-        let profiles = profiles::load_profiles().map_err(|e| format!("failed to load profiles: {e}"))?;
+        let profiles =
+            profiles::load_profiles().map_err(|e| format!("failed to load profiles: {e}"))?;
         let url = profiles
             .resolve(rest)
             .ok_or_else(|| format!("unknown profile alias: @{rest}"))?;
@@ -185,8 +194,7 @@ fn read_value(value: Option<String>) -> Result<String, String> {
         }
         None => {
             let prompt = "Value: ";
-            rpassword::prompt_password(prompt)
-                .map_err(|e| format!("failed to read password: {e}"))
+            rpassword::prompt_password(prompt).map_err(|e| format!("failed to read password: {e}"))
         }
         Some(v) => Ok(v.to_owned()),
     }

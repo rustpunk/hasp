@@ -91,13 +91,46 @@ This matters because:
 Hasp exposes exactly five operations. Every backend implements the subset
 it supports.
 
-| Operation | Meaning |
-|---|---|
-| `get` | Read a secret value |
-| `put` | Write a secret value |
-| `list` | List entries under a prefix or collection |
-| `delete` | Remove a secret |
-| `exists` | Check presence (exit 0 = present, 1 = absent) |
+| Operation | Meaning | Example |
+|---|---|---|
+| `get` | Read a secret value | `store.get("env://HOME")` |
+| `put` | Write a secret value | `store.put("file:///tmp/secret", &secret)` |
+| `list` | List entries under a prefix or collection | `store.list("vault://127.0.0.1/secret/")` |
+| `delete` | Remove a secret | `store.delete("file:///tmp/secret")` |
+| `exists` | Check presence (exit 0 = present, 1 = absent) | `store.exists("env://HOME")` |
+
+### Library entry points
+
+The library provides three ways to obtain a `Store`:
+
+```rust
+use hasp::Store;
+
+// All enabled backends (depends on Cargo features)
+let store = Store::with_defaults();
+
+// Custom subset, e.g. only env and file
+let store = Store::with_backends(vec![
+    hasp::Backend::Env(hasp::EnvBackend),
+    hasp::Backend::File(hasp::FileBackend),
+]);
+
+// Empty store, then register backends manually
+let mut store = Store::empty();
+store.register(hasp::Backend::Env(hasp::EnvBackend));
+```
+
+For one-off usage, free functions construct a default store internally:
+
+```rust
+let secret = hasp::get("env://HOME")?;
+hasp::put("file:///tmp/secret", &secret)?;
+hasp::exists("env://HOME")?;
+```
+
+These match the sibling-crate `ferrule` convention and are thin wrappers
+over `Store::with_defaults()`. Heavy callers should cache a `Store`
+instance to avoid repeated backend construction.
 
 Not every backend supports every operation. For example, `env://`
 does not support `put` (environment variables are read-only after

@@ -1,3 +1,4 @@
+use hasp::ExposeSecret;
 use hasp::Store;
 use std::env;
 use std::sync::Mutex;
@@ -80,6 +81,44 @@ mod env_tests {
             }
         ));
     }
+}
+
+#[test]
+fn store_empty_has_no_backends() {
+    let store = Store::empty();
+    let err = store.get("env://HOME").unwrap_err();
+    assert!(matches!(err, hasp::Error::UnknownScheme(ref s) if s == "env"));
+}
+
+#[cfg(feature = "env")]
+#[test]
+fn store_with_backends_registers_only_given() {
+    let store = Store::with_backends(vec![hasp::Backend::Env(hasp::EnvBackend)]);
+
+    let result = store.get("env://HOME");
+    assert!(result.is_ok() || result.is_err());
+
+    let err = store.get("file:///tmp/test.txt").unwrap_err();
+    assert!(matches!(err, hasp::Error::UnknownScheme(ref s) if s == "file"));
+}
+
+#[cfg(feature = "env")]
+#[test]
+fn free_function_get_uses_defaults() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let _guard = EnvGuard::set("HASP_FREE_FN_TEST", "free-fn-value");
+
+    let secret = hasp::get("env://HASP_FREE_FN_TEST").unwrap();
+    assert_eq!(secret.expose_secret(), "free-fn-value");
+}
+
+#[cfg(feature = "env")]
+#[test]
+fn free_function_exists_uses_defaults() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let _guard = EnvGuard::set("HASP_FREE_FN_EXISTS", "1");
+
+    assert!(hasp::exists("env://HASP_FREE_FN_EXISTS").unwrap());
 }
 
 #[test]
