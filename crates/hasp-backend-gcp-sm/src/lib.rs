@@ -6,15 +6,14 @@
 //!     `^[a-zA-Z0-9-_]{1,255}$` per GCP. Leading `/` is stripped.
 //!   - `?version`     — Optional version label. Defaults to `latest`.
 //!
-//! Supported operations: `get`, `exists`.
-//! `put`, `list`, `delete`: `UnsupportedOperation`.
+//! Supported operations: `get`, `put`, `list`, `delete`, `exists`.
 //!
 //! Authentication is ambient only: `GOOGLE_APPLICATION_CREDENTIALS`
 //! or VM metadata service. `gcp-auth` resolves these transparently.
 //! No auth-bootstrap flows or credential refresh logic lives in this
 //! crate.
 
-use hasp_core::{Backend, BackendFailureKind, Entry, Error, SecretString};
+use hasp_core::{Backend, BackendFailureKind, Entry, Error, ExposeSecret, SecretString};
 use serde::Deserialize;
 use url::Url;
 
@@ -232,25 +231,140 @@ impl Backend for GcpSmBackend {
         Ok(SecretString::new(text.into()))
     }
 
-    fn put(&self, _url: &Url, _value: &SecretString) -> Result<(), Error> {
-        Err(Error::UnsupportedOperation {
-            scheme: Self::SCHEME,
-            operation: "put",
-        })
+    fn put(&self, url: &Url, value: &SecretString) -> Result<(), Error> {
+        let gcp_url = GcpSmUrl::try_from(url)?;
+        let token = self.token()?;
+
+        // Try to create the secret. If it already exists (409), skip.
+        let create_url = format!(
+            "{}/projects/{}/secrets",
+            Self::BASE_URL,
+            gcp_url.project_id,
+        );
+
+        let create_body = serde_json::json!({
+            "replication": { "automatic": {} },
+        });
+
+        let client = self.client();
+        let create_response = client
+            .post(&create_url)
+            .bearer_auth(&token)
+            .json(&create_body)
+            .send()
+            .map_err(map_reqwest_error)?;
+
+        // 409 AlreadyExists is fine — just add a new version.
+        if !create_response.status().is_success()
+            && create_response.status() != reqwest::StatusCode::CONFLICT
+        {
+            return Err(map_http_status(create_response.status(), url));
+        }
+
+        // Add secret version.
+        let add_version_url = format!(
+            "{}/projects/{}/secrets/{}/versions:add",
+            Self::BASE_URL,
+            gcp_url.project_id,
+            gcp_url.secret_id,
+        );
+
+        // GCP Secret Manager expects base64-encoded payload.
+        let payload = base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            value.expose_secret().as_bytes(),
+        );
+        let version_body = serde_json::json!({ "payload": { "data": payload } });
+
+        let version_response = client
+            .post(&add_version_url)
+            .bearer_auth(&token)
+            .json(&version_body)
+            .send()
+            .map_err(map_reqwest_error)?;
+
+        if !version_response.status().is_success() {
+            return Err(map_http_status(version_response.status(), url));
+        }
+
+        Ok(())
     }
 
-    fn list(&self, _url: &Url) -> Result<Vec<Entry>, Error> {
-        Err(Error::UnsupportedOperation {
+    fn list(&self, url: &Url) -> Result<Vec<Entry>, Error> {
+        let gcp_url = GcpSmUrl::try_from(url)?;
+        let token = self.token()?;
+
+        let request_url = format!(
+            "{}/projects/{}/secrets",
+            Self::BASE_URL,
+            gcp_url.project_id,
+        );
+
+        let client = self.client();
+        let response = client
+            .get(&request_url)
+            .bearer_auth(&token)
+            .send()
+            .map_err(map_reqwest_error)?;
+
+        let status = response.status();
+        if !status.is_success() {
+            return Err(map_http_status(status, url));
+        }
+
+        let payload: SecretListResponse = response.json().map_err(|e| Error::Backend {
             scheme: Self::SCHEME,
-            operation: "list",
-        })
+            kind: BackendFailureKind::Permanent,
+            message: format!("invalid JSON from GCP Secret Manager list: {e}"),
+        })?;
+
+        let mut entries = Vec::new();
+        for secret in payload.secrets.into_iter().flatten() {
+            let name = secret.name;
+            if name.is_empty() {
+                continue;
+            }
+            let entry_url = Url::parse(&format!(
+                "gcp-sm://{}/{name}",
+                gcp_url.project_id,
+            ))
+            .map_err(|e| Error::Backend {
+                scheme: Self::SCHEME,
+                kind: BackendFailureKind::Permanent,
+                message: format!("failed to build list entry URL: {e}"),
+            })?;
+            entries.push(Entry { name, url: entry_url });
+        }
+
+        // List responses are paginated via `nextPageToken`. Full
+        // pagination following is not implemented in this pass.
+        // Reference: https://cloud.google.com/secret-manager/docs/reference/rest/v1/projects.secrets/list
+        Ok(entries)
     }
 
-    fn delete(&self, _url: &Url) -> Result<(), Error> {
-        Err(Error::UnsupportedOperation {
-            scheme: Self::SCHEME,
-            operation: "delete",
-        })
+    fn delete(&self, url: &Url) -> Result<(), Error> {
+        let gcp_url = GcpSmUrl::try_from(url)?;
+        let token = self.token()?;
+
+        let request_url = format!(
+            "{}/projects/{}/secrets/{}",
+            Self::BASE_URL,
+            gcp_url.project_id,
+            gcp_url.secret_id,
+        );
+
+        let client = self.client();
+        let response = client
+            .delete(&request_url)
+            .bearer_auth(&token)
+            .send()
+            .map_err(map_reqwest_error)?;
+
+        if !response.status().is_success() {
+            return Err(map_http_status(response.status(), url));
+        }
+
+        Ok(())
     }
 
     fn exists(&self, url: &Url) -> Result<bool, Error> {
@@ -291,6 +405,24 @@ struct AccessResponse {
 #[derive(Debug, Deserialize)]
 struct SecretData {
     data: String,
+}
+
+/// Response body from the GCP Secret Manager `ListSecrets` endpoint.
+///
+/// `secrets` is an array of secret metadata. `nextPageToken` is the token
+/// for the next page; pagination following is not implemented in this pass.
+#[derive(Debug, Deserialize)]
+struct SecretListResponse {
+    #[serde(default)]
+    secrets: Option<Vec<SecretListItem>>,
+}
+
+/// A single secret entry in the GCP Secret Manager list response.
+///
+/// `name` is the full resource name like `projects/my-project/secrets/my-secret`.
+#[derive(Debug, Deserialize)]
+struct SecretListItem {
+    name: String,
 }
 
 /// Map `reqwest` network errors into the locked `hasp_core::Error` taxonomy.
@@ -460,32 +592,41 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_operations() {
+    fn supported_operations() {
         let backend = GcpSmBackend::new();
         let url = Url::parse("gcp-sm://my-project/my-secret").unwrap();
         let dummy = SecretString::new("x".into());
 
-        assert!(matches!(
-            backend.put(&url, &dummy),
-            Err(Error::UnsupportedOperation {
-                scheme: "gcp-sm",
-                operation: "put"
-            })
-        ));
-        assert!(matches!(
-            backend.list(&url),
-            Err(Error::UnsupportedOperation {
-                scheme: "gcp-sm",
-                operation: "list"
-            })
-        ));
-        assert!(matches!(
-            backend.delete(&url),
-            Err(Error::UnsupportedOperation {
-                scheme: "gcp-sm",
-                operation: "delete"
-            })
-        ));
+        assert!(
+            matches!(
+                backend.put(&url, &dummy),
+                Err(Error::Backend { .. })
+                    | Err(Error::NotFound(_))
+                    | Err(Error::AuthenticationFailed(_))
+            ),
+            "put now supported (fails at network layer): {err:?}",
+            err = backend.put(&url, &dummy).unwrap_err()
+        );
+        assert!(
+            matches!(
+                backend.list(&url),
+                Err(Error::Backend { .. })
+                    | Err(Error::NotFound(_))
+                    | Err(Error::AuthenticationFailed(_))
+            ),
+            "list now supported (fails at network layer): {err:?}",
+            err = backend.list(&url).unwrap_err()
+        );
+        assert!(
+            matches!(
+                backend.delete(&url),
+                Err(Error::Backend { .. })
+                    | Err(Error::NotFound(_))
+                    | Err(Error::AuthenticationFailed(_))
+            ),
+            "delete now supported (fails at network layer): {err:?}",
+            err = backend.delete(&url).unwrap_err()
+        );
     }
 
     #[test]
