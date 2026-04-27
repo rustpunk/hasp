@@ -228,6 +228,152 @@ fn cli_unknown_scheme() {
     );
 }
 
+#[test]
+fn cli_complete_bash() {
+    let output = hasp().args(["complete", "bash"]).output().unwrap();
+    assert!(
+        output.status.success(),
+        "hasp complete bash failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("_hasp()"),
+        "bash completion should define _hasp function, got: {stdout}"
+    );
+}
+
+#[test]
+fn cli_complete_zsh() {
+    let output = hasp().args(["complete", "zsh"]).output().unwrap();
+    assert!(
+        output.status.success(),
+        "hasp complete zsh failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("#compdef hasp"),
+        "zsh completion should contain #compdef, got: {stdout}"
+    );
+}
+
+#[test]
+fn cli_complete_fish() {
+    let output = hasp().args(["complete", "fish"]).output().unwrap();
+    assert!(
+        output.status.success(),
+        "hasp complete fish failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("complete -c hasp"),
+        "fish completion should register hasp completions, got: {stdout}"
+    );
+}
+
+#[test]
+fn cli_complete_powershell() {
+    let output = hasp().args(["complete", "powershell"]).output().unwrap();
+    assert!(
+        output.status.success(),
+        "hasp complete powershell failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Register-ArgumentCompleter"),
+        "powershell completion should register an argument completer, got: {stdout}"
+    );
+}
+
+#[test]
+fn cli_complete_dynamic_scheme() {
+    let output = hasp()
+        .env("COMPLETE", "bash")
+        .env("_CLAP_COMPLETE_INDEX", "2")
+        .args(["--", "hasp", "get", "env"])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "dynamic completion failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("env://"),
+        "expected env:// in completions, got: {stdout}"
+    );
+}
+
+#[test]
+fn cli_complete_dynamic_profile() {
+    let dir = tempfile::tempdir().unwrap();
+    let profile_path = dir.path().join("profiles.toml");
+    std::fs::write(
+        &profile_path,
+        r#"
+[profiles.prod]
+db_password = "env://DB_PASSWORD"
+api_key = "env://API_KEY"
+"#,
+    )
+    .unwrap();
+
+    let output = hasp()
+        .env("COMPLETE", "bash")
+        .env("_CLAP_COMPLETE_INDEX", "2")
+        .env("HASP_PROFILES_PATH", profile_path.as_os_str())
+        .args(["--", "hasp", "get", "@prod/"])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "dynamic profile completion failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("@prod/db_password"),
+        "expected @prod/db_password in completions, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("@prod/api_key"),
+        "expected @prod/api_key in completions, got: {stdout}"
+    );
+}
+
+#[test]
+fn cli_complete_dynamic_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let file_path = dir.path().join("testfile.txt");
+    std::fs::write(&file_path, "").unwrap();
+
+    let prefix = format!("file://{}/", dir.path().to_string_lossy());
+    let output = hasp()
+        .env("COMPLETE", "bash")
+        .env("_CLAP_COMPLETE_INDEX", "2")
+        .args(["--", "hasp", "get", &prefix])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "dynamic file completion failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let expected = format!("{prefix}testfile.txt");
+    assert!(
+        stdout.contains(&expected),
+        "expected {expected} in completions, got: {stdout}"
+    );
+}
+
 // Guard that sets an environment variable for the duration of a test
 // and restores it afterward.
 struct EnvGuard {

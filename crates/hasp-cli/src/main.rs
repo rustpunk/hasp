@@ -1,7 +1,9 @@
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand, ValueHint};
+use clap_complete::engine::ArgValueCompleter;
 use secrecy::ExposeSecret;
 use std::io::{self, IsTerminal, Read};
 
+mod completions;
 mod profiles;
 
 /// Unified secrets CLI.
@@ -20,11 +22,13 @@ enum Command {
     /// Fetch a secret.
     Get {
         /// URL or alias (`@profile/key`) of the secret.
+        #[arg(value_hint = ValueHint::AnyPath, add = ArgValueCompleter::new(completions::complete_address))]
         address: String,
     },
     /// Store a secret.
     Put {
         /// URL or alias (`@profile/key`) of the secret.
+        #[arg(value_hint = ValueHint::AnyPath, add = ArgValueCompleter::new(completions::complete_address))]
         address: String,
         /// Value to store. Use `-` to read from stdin.
         /// If omitted in a TTY, you will be prompted securely.
@@ -33,21 +37,36 @@ enum Command {
     /// List entries matching a URL prefix or alias.
     List {
         /// URL or alias (`@profile`) to list.
+        #[arg(value_hint = ValueHint::AnyPath, add = ArgValueCompleter::new(completions::complete_address))]
         address: String,
     },
     /// Delete a secret.
     Delete {
         /// URL or alias (`@profile/key`) of the secret.
+        #[arg(value_hint = ValueHint::AnyPath, add = ArgValueCompleter::new(completions::complete_address))]
         address: String,
     },
     /// Check whether a secret exists.
     Exists {
         /// URL or alias (`@profile/key`) of the secret.
+        #[arg(value_hint = ValueHint::AnyPath, add = ArgValueCompleter::new(completions::complete_address))]
         address: String,
+    },
+    /// Generate shell completions for the `hasp` binary.
+    ///
+    /// Hidden from help to keep the CLI surface minimal — completions
+    /// are a packaging concern, not a daily user workflow.
+    #[command(hide = true)]
+    Complete {
+        /// Target shell.
+        shell: clap_complete::aot::Shell,
     },
 }
 
 fn main() {
+    clap_complete::CompleteEnv::with_factory(Cli::command)
+        .complete();
+
     if let Err(e) = run() {
         eprintln!("{e}");
         std::process::exit(1);
@@ -85,6 +104,11 @@ fn run() -> Result<(), String> {
             let url = resolve(&address)?;
             let exists = store.exists(&url).map_err(fmt_error)?;
             std::process::exit(if exists { 0 } else { 1 });
+        }
+        Command::Complete { shell } => {
+            let mut app = Cli::command();
+            let bin_name = app.get_name().to_string();
+            clap_complete::aot::generate(shell, &mut app, bin_name, &mut io::stdout());
         }
     }
     Ok(())

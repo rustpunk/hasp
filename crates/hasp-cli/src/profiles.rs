@@ -49,6 +49,19 @@ impl Profiles {
             None => profile.get(profile_name).cloned(),
         }
     }
+
+    /// All profile names.
+    pub fn list_profiles(&self) -> Vec<String> {
+        self.inner.keys().cloned().collect()
+    }
+
+    /// All keys defined within a profile.
+    pub fn list_keys(&self, profile: &str) -> Vec<String> {
+        self.inner
+            .get(profile)
+            .map(|m| m.keys().cloned().collect())
+            .unwrap_or_default()
+    }
 }
 
 /// Load profiles from the config file path.
