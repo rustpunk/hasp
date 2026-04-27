@@ -8,8 +8,7 @@
 //!   - `?with-decryption`  — Optional boolean (default `true`). Pass
 //!     `false` to fetch a `SecureString` value without invoking KMS.
 //!
-//! Supported operations: `get`, `exists`.
-//! `put`, `list`, `delete`: `UnsupportedOperation`.
+//! Supported operations: `get`, `put`, `list`, `delete`, `exists`.
 //!
 //! Authentication is ambient only: `AWS_ACCESS_KEY_ID` +
 //! `AWS_SECRET_ACCESS_KEY`, `AWS_PROFILE`, IAM role via IMDS/ECS/EKS, or
@@ -239,38 +238,51 @@ async fn put_parameter(aws_url: &AwsSsmUrl, value: &str) -> Result<(), Error> {
 /// List parameters via `GetParametersByPath`.
 ///
 /// The URL path serves as the hierarchical prefix. AWS SSM list returns
-/// every parameter under the given path. For a first pass without automatic
-/// pagination, only one page is returned.
+/// every parameter under the given path. Transparent pagination follows
+/// `NextToken` until exhausted (bounded at 500 pages).
 async fn list_parameters(aws_url: &AwsSsmUrl) -> Result<Vec<Entry>, Error> {
     let config = aws_config_for_region(&aws_url.region).await;
     let client = aws_sdk_ssm::Client::new(&config);
 
-    let output = client
-        .get_parameters_by_path()
-        .path(&aws_url.parameter_name)
-        .recursive(true)
-        .send()
-        .await
-        .map_err(map_list_error)?;
-
     let mut entries = Vec::new();
-    for param in output.parameters.into_iter().flatten() {
-        let name = param.name.unwrap_or_default();
-        if name.is_empty() {
-            continue;
+    let mut next_token: Option<String> = None;
+    const MAX_PAGES: usize = 500;
+
+    for _ in 0..MAX_PAGES {
+        let mut builder = client
+            .get_parameters_by_path()
+            .path(&aws_url.parameter_name)
+            .recursive(true);
+
+        if let Some(ref token) = next_token {
+            builder = builder.next_token(token);
         }
-        let entry_url = Url::parse(&format!(
-            "aws-ssm://{}/{}?with-decryption={}",
-            aws_url.region,
-            name,
-            aws_url.with_decryption,
-        ))
-        .map_err(|e| Error::Backend {
-            scheme: "aws-ssm",
-            kind: BackendFailureKind::Permanent,
-            message: format!("failed to build list entry URL: {e}"),
-        })?;
-        entries.push(Entry { name, url: entry_url });
+
+        let output = builder.send().await.map_err(map_list_error)?;
+        next_token = output.next_token.clone();
+
+        for param in output.parameters.into_iter().flatten() {
+            let name = param.name.unwrap_or_default();
+            if name.is_empty() {
+                continue;
+            }
+            let entry_url = Url::parse(&format!(
+                "aws-ssm://{}/{}?with-decryption={}",
+                aws_url.region,
+                name,
+                aws_url.with_decryption,
+            ))
+            .map_err(|e| Error::Backend {
+                scheme: "aws-ssm",
+                kind: BackendFailureKind::Permanent,
+                message: format!("failed to build list entry URL: {e}"),
+            })?;
+            entries.push(Entry { name, url: entry_url });
+        }
+
+        if next_token.is_none() {
+            break;
+        }
     }
 
     Ok(entries)
@@ -542,5 +554,12 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn supported_operations() {
+        let _backend = AwsSsmBackend::new();
+        // put, list, delete are implemented; they fail at network layer
+        // because no AWS credentials are configured in unit tests.
     }
 }

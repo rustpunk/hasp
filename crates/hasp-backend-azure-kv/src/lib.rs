@@ -263,55 +263,60 @@ impl Backend for AzureKvBackend {
     fn list(&self, url: &Url) -> Result<Vec<Entry>, Error> {
         let kv_url = AzureKvUrl::try_from(url)?;
         let token = self.token()?;
-        let request_url = self.build_list_url(&kv_url.vault_name);
+        let mut request_url = self.build_list_url(&kv_url.vault_name);
 
         let client = self.client();
-        let response = client
-            .get(&request_url)
-            .bearer_auth(&token)
-            .send()
-            .map_err(map_reqwest_error)?;
-
-        let status = response.status();
-        if !status.is_success() {
-            return Err(map_http_status(status, url));
-        }
-
-        let payload: SecretListResponse = response.json().map_err(|e| Error::Backend {
-            scheme: Self::SCHEME,
-            kind: BackendFailureKind::Permanent,
-            message: format!("invalid JSON from Azure Key Vault list: {e}"),
-        })?;
-
         let mut entries = Vec::new();
-        // Extract secret names from full Azure IDs. Each entry id is a URL
-        // like https://vault.vault.azure.net/secrets/name/versions/xxx.
-        // We extract the name component for the canonical hasp URL.
-        for item in payload.value.into_iter().flatten() {
-            // Azure resource IDs look like:
-            // https://vault.vault.azure.net/secrets/name/version
-            // The name is the second-to-last path segment.
-            let segments: Vec<_> = item.id.rsplit('/').collect();
-            let name = if segments.len() >= 2 {
-                segments[1].to_owned()
-            } else {
-                item.id.rsplit('/').next().unwrap_or(&item.id).to_owned()
-            };
-            let entry_url = Url::parse(&format!("azure-kv://{}/{name}", kv_url.vault_name))
-                .map_err(|e| Error::Backend {
-                    scheme: Self::SCHEME,
-                    kind: BackendFailureKind::Permanent,
-                    message: format!("failed to build list entry URL: {e}"),
-                })?;
-            entries.push(Entry {
-                name: name.clone(),
-                url: entry_url,
-            });
+        const MAX_PAGES: usize = 500;
+
+        for _ in 0..MAX_PAGES {
+            let response = client
+                .get(&request_url)
+                .bearer_auth(&token)
+                .send()
+                .map_err(map_reqwest_error)?;
+
+            let status = response.status();
+            if !status.is_success() {
+                return Err(map_http_status(status, url));
+            }
+
+            let payload: SecretListResponse = response.json().map_err(|e| Error::Backend {
+                scheme: Self::SCHEME,
+                kind: BackendFailureKind::Permanent,
+                message: format!("invalid JSON from Azure Key Vault list: {e}"),
+            })?;
+
+            // Extract secret names from full Azure IDs. Each entry id is a URL
+            // like https://vault.vault.azure.net/secrets/name/versions/xxx.
+            // We extract the name component for the canonical hasp URL.
+            for item in payload.value.into_iter().flatten() {
+                let segments: Vec<_> = item.id.rsplit('/').collect();
+                let name = if segments.len() >= 2 {
+                    segments[1].to_owned()
+                } else {
+                    item.id.rsplit('/').next().unwrap_or(&item.id).to_owned()
+                };
+                let entry_url = Url::parse(&format!("azure-kv://{}/{name}", kv_url.vault_name))
+                    .map_err(|e| Error::Backend {
+                        scheme: Self::SCHEME,
+                        kind: BackendFailureKind::Permanent,
+                        message: format!("failed to build list entry URL: {e}"),
+                    })?;
+                entries.push(Entry {
+                    name: name.clone(),
+                    url: entry_url,
+                });
+            }
+
+            match payload.next_link {
+                Some(link) if !link.is_empty() => {
+                    request_url = link;
+                }
+                _ => break,
+            }
         }
 
-        // List responses are paginated via `nextLink`. Full pagination
-        // following is not implemented in this pass.
-        // Reference: https://docs.microsoft.com/en-us/rest/api/keyvault/get-secrets/get-secrets
         Ok(entries)
     }
 
@@ -366,11 +371,13 @@ struct SecretResponse {
 /// Response body from the Azure Key Vault `GetSecrets` (list) endpoint.
 ///
 /// `value` is an array of secret identifiers. `nextLink` is the URL for
-/// the next page; pagination following is not implemented in this pass.
+/// the next page; it is followed transparently up to a bounded limit.
 #[derive(Debug, Deserialize)]
 struct SecretListResponse {
     #[serde(default)]
     value: Option<Vec<SecretListItem>>,
+    #[serde(rename = "nextLink")]
+    next_link: Option<String>,
 }
 
 /// A single secret entry in the Azure Key Vault list response.
@@ -657,6 +664,17 @@ mod tests {
         assert_eq!(segments[1], "secret-a");
         let segments: Vec<_> = items[1].id.rsplit('/').collect();
         assert_eq!(segments[1], "secret-b");
+    }
+
+    #[test]
+    fn list_parsing_with_next_link() {
+        let payload: SecretListResponse = serde_json::from_str(
+            r#"{"value":[{"id":"https://my-vault.vault.azure.net/secrets/secret-a/abc123"}],"nextLink":"https://my-vault.vault.azure.net/secrets?api-version=7.5&$skiptoken=abc"}"#
+        ).unwrap();
+
+        let items = payload.value.unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(payload.next_link.unwrap(), "https://my-vault.vault.azure.net/secrets?api-version=7.5&$skiptoken=abc");
     }
 
     #[test]

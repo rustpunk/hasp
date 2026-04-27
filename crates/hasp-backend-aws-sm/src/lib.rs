@@ -283,34 +283,45 @@ async fn put_secret(aws_url: &AwsSmUrl, value: &str) -> Result<(), Error> {
 
 /// List secrets via `ListSecrets`.
 ///
-/// Returns every secret in the region as an `Entry`. AWS does not support
-/// prefix filtering natively in `ListSecrets`; callers should filter names.
+/// Returns every secret in the region as an `Entry`. Transparent pagination
+/// follows `NextToken` until exhausted (bounded at 500 pages).
 async fn list_secrets(aws_url: &AwsSmUrl) -> Result<Vec<Entry>, Error> {
     let config = aws_config_for_region(&aws_url.region).await;
     let client = aws_sdk_secretsmanager::Client::new(&config);
 
-    let output = client
-        .list_secrets()
-        .send()
-        .await
-        .map_err(map_list_error)?;
-
     let mut entries = Vec::new();
-    for secret in output.secret_list.into_iter().flatten() {
-        let name = secret.name.unwrap_or_default();
-        if name.is_empty() {
-            continue;
+    let mut next_token: Option<String> = None;
+    const MAX_PAGES: usize = 500;
+
+    for _ in 0..MAX_PAGES {
+        let mut builder = client.list_secrets();
+        if let Some(ref token) = next_token {
+            builder = builder.next_token(token);
         }
-        let entry_url = Url::parse(&format!("aws-sm://{}/{name}", aws_url.region))
-            .map_err(|e| Error::Backend {
-                scheme: "aws-sm",
-                kind: BackendFailureKind::Permanent,
-                message: format!("failed to build list entry URL: {e}"),
-            })?;
-        entries.push(Entry {
-            name,
-            url: entry_url,
-        });
+
+        let output = builder.send().await.map_err(map_list_error)?;
+        next_token = output.next_token.clone();
+
+        for secret in output.secret_list.into_iter().flatten() {
+            let name = secret.name.unwrap_or_default();
+            if name.is_empty() {
+                continue;
+            }
+            let entry_url = Url::parse(&format!("aws-sm://{}/{name}", aws_url.region))
+                .map_err(|e| Error::Backend {
+                    scheme: "aws-sm",
+                    kind: BackendFailureKind::Permanent,
+                    message: format!("failed to build list entry URL: {e}"),
+                })?;
+            entries.push(Entry {
+                name,
+                url: entry_url,
+            });
+        }
+
+        if next_token.is_none() {
+            break;
+        }
     }
 
     Ok(entries)

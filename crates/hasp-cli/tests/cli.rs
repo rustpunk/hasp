@@ -160,6 +160,57 @@ my_secret = "env://HASP_CLI_PROFILE_SECRET"
 }
 
 #[test]
+fn cli_delete_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("to-delete.txt");
+    let url = url::Url::from_file_path(&path).unwrap().to_string();
+
+    // put
+    let output = hasp()
+        .args(["put", &url, "deletable-secret"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "hasp put failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // delete
+    let output = hasp().args(["delete", &url]).output().unwrap();
+    assert!(
+        output.status.success(),
+        "hasp delete failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // exists returns non-zero
+    let output = hasp().args(["exists", &url]).output().unwrap();
+    assert!(
+        !output.status.success(),
+        "hasp exists should return non-zero after delete"
+    );
+}
+
+#[test]
+fn cli_list_unsupported() {
+    let output = hasp()
+        .args(["list", "env://HOME"])
+        .output()
+        .unwrap();
+
+    assert!(
+        !output.status.success(),
+        "hasp list unsupported should fail"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("does not support list"),
+        "expected unsupported operation in stderr, got: {stderr}"
+    );
+}
+
+#[test]
 fn cli_unknown_scheme() {
     let output = hasp()
         .args(["get", "unknown://thing"])

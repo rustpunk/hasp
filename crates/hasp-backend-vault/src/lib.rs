@@ -7,11 +7,15 @@
 //!   - `?field=`  — optional key to extract from the JSON `data.data`
 //!     object. When absent, the entire object is serialized.
 //!
-//! Supported operations: `get`, `list`, `delete`, `exists`.
+//! Supported operations: `get`, `put`, `list`, `delete`, `exists`.
 //!
-//! `put` is deferred: KV v2 stores JSON objects under `data.data`. A URL with
-//! `?field=password` implies field-level update, which requires read-modify-write
-//! semantics that `Backend::put` does not yet define.
+//! `put` semantics:
+//! - Without `?field=`: the value must be valid JSON and replaces the entire
+//!   `data.data` object. Symmetric with `get` without `?field=`, which
+//!   serializes the whole object.
+//! - With `?field=`: performs read-modify-write. Creates the secret if
+//!   absent. Non-JSON values are stored as JSON strings. This is optimistic:
+//!   no CAS, so concurrent writes are last-write-wins.
 //!
 //! Authentication is ambient only: `VAULT_ADDR` and `VAULT_TOKEN`.
 //! If either is missing, every operation fails fast with
@@ -22,7 +26,7 @@
 //! existence oracles. This backend follows that choice: both map to
 //! `NotFound` on `get` and to `false` on `exists`.
 
-use hasp_core::{Backend, BackendFailureKind, Entry, Error, SecretString};
+use hasp_core::{Backend, BackendFailureKind, Entry, Error, ExposeSecret, SecretString};
 use std::time::Duration;
 use url::Url;
 
@@ -123,11 +127,73 @@ impl Backend for VaultBackend {
         extract_secret(&body, vault_url.field.as_deref())
     }
 
-    fn put(&self, _url: &Url, _value: &SecretString) -> Result<(), Error> {
-        Err(Error::UnsupportedOperation {
-            scheme: "vault",
-            operation: "put",
-        })
+    fn put(&self, url: &Url, value: &SecretString) -> Result<(), Error> {
+        check_ambient_credentials()?;
+        let vault_url = VaultUrl::try_from(url)?;
+        let (token, addr) = ambient_credentials()?;
+        let request_url = build_request_url(&addr, &vault_url.mount, &vault_url.path);
+
+        let client = build_client()?;
+
+        let data = if let Some(ref field) = vault_url.field {
+            // Read-modify-write: optimistic, no CAS.
+            let get_resp = client
+                .get(&request_url)
+                .header("X-Vault-Token", &token)
+                .send()
+                .map_err(map_reqwest_error)?;
+
+            let mut obj = match get_resp.status() {
+                reqwest::StatusCode::OK => {
+                    let body: serde_json::Value = get_resp.json().map_err(|e| Error::Backend {
+                        scheme: "vault",
+                        kind: BackendFailureKind::Permanent,
+                        message: format!("invalid JSON from Vault: {e}"),
+                    })?;
+                    body.get("data")
+                        .and_then(|d| d.get("data"))
+                        .cloned()
+                        .unwrap_or_else(|| serde_json::json!({}))
+                }
+                reqwest::StatusCode::FORBIDDEN | reqwest::StatusCode::NOT_FOUND => {
+                    serde_json::json!({})
+                }
+                status => return Err(map_vault_status(status, url)),
+            };
+
+            let json_value = serde_json::from_str(value.expose_secret())
+                .unwrap_or_else(|_| {
+                    serde_json::Value::String(value.expose_secret().to_owned())
+                });
+
+            if let Some(map) = obj.as_object_mut() {
+                map.insert(field.clone(), json_value);
+            } else {
+                return Err(Error::Backend {
+                    scheme: "vault",
+                    kind: BackendFailureKind::Permanent,
+                    message: "Vault secret data is not a JSON object; cannot update field".into(),
+                });
+            }
+            obj
+        } else {
+            serde_json::from_str(value.expose_secret())
+                .map_err(|e| Error::InvalidUrl(format!("vault:// put value must be valid JSON: {e}")))?
+        };
+
+        let body = serde_json::json!({ "data": data });
+
+        let post_resp = client
+            .post(&request_url)
+            .header("X-Vault-Token", &token)
+            .json(&body)
+            .send()
+            .map_err(map_reqwest_error)?;
+
+        match post_resp.status() {
+            reqwest::StatusCode::OK | reqwest::StatusCode::NO_CONTENT => Ok(()),
+            status => Err(map_vault_status(status, url)),
+        }
     }
 
     fn list(&self, url: &Url) -> Result<Vec<Entry>, Error> {
@@ -349,8 +415,10 @@ fn map_vault_status(status: reqwest::StatusCode, url: &Url) -> Error {
 /// Extract the secret value from a Vault KV read response.
 ///
 /// Locates `data.data` then either extracts the named `field` or serializes
-/// the entire object. Secret values are wrapped in `SecretString` at this
-/// boundary.
+/// the entire object. Non-string field values are rendered via
+/// `serde_json::Value::to_string()` so `get` and `put` with `?field=` are
+/// symmetric for scalar values. Secret values are wrapped in `SecretString`
+/// at this boundary.
 fn extract_secret(body: &serde_json::Value, field: Option<&str>) -> Result<SecretString, Error> {
     let data = body
         .get("data")
@@ -362,11 +430,12 @@ fn extract_secret(body: &serde_json::Value, field: Option<&str>) -> Result<Secre
         })?;
 
     let value = match field {
-        Some(f) => data
-            .get(f)
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| Error::NotFound(format!("field '{f}' not found in secret")))?
-            .to_owned(),
+        Some(f) => {
+            let v = data.get(f).ok_or_else(|| {
+                Error::NotFound(format!("field '{f}' not found in secret"))
+            })?;
+            v.as_str().map(|s| s.to_owned()).unwrap_or_else(|| v.to_string())
+        }
         None => data.to_string(),
     };
 
@@ -518,6 +587,19 @@ mod tests {
     }
 
     #[test]
+    fn extract_field_as_number_returns_stringified() {
+        let body = serde_json::json!({
+            "data": {
+                "data": {
+                    "count": 42
+                }
+            }
+        });
+        let secret = extract_secret(&body, Some("count")).unwrap();
+        assert_eq!(secret.expose_secret(), "42");
+    }
+
+    #[test]
     fn extract_field_missing() {
         let body = serde_json::json!({
             "data": {
@@ -651,7 +733,41 @@ mod tests {
     }
 
     #[test]
-    fn supported_and_deferred_operations() {
+    fn put_invalid_json_without_field() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _token_guard = EnvGuard::set("VAULT_TOKEN", "test-token");
+        let _addr_guard = EnvGuard::set("VAULT_ADDR", "http://localhost:8200");
+
+        let backend = VaultBackend::new();
+        let url = Url::parse("vault://secret/data/test").unwrap();
+        let dummy = SecretString::new("not-valid-json".into());
+
+        let err = backend.put(&url, &dummy).unwrap_err();
+        assert!(
+            matches!(err, Error::InvalidUrl(ref s) if s.contains("must be valid JSON")),
+            "expected InvalidUrl for non-JSON value without field, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn put_with_field_requires_auth() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _token_guard = EnvGuard::set("VAULT_TOKEN", "test-token");
+        let _addr_guard = EnvGuard::set("VAULT_ADDR", "http://localhost:8200");
+
+        let backend = VaultBackend::new();
+        let url = Url::parse("vault://secret/data/test?field=password").unwrap();
+        let dummy = SecretString::new("secret123".into());
+
+        let err = backend.put(&url, &dummy).unwrap_err();
+        assert!(
+            matches!(err, Error::Backend { .. } | Error::NotFound(_) | Error::AuthenticationFailed(_)),
+            "expected network-layer error for put with field, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn supported_operations() {
         let backend = VaultBackend::new();
         let url = Url::parse("vault://secret/data/test?field=password").unwrap();
 
@@ -662,7 +778,7 @@ mod tests {
                     | Err(Error::Backend { .. })
                     | Err(Error::NotFound(_))
             ),
-            "delete now supported (fails at network layer)"
+            "delete supported (fails at network layer)"
         );
 
         assert!(
@@ -672,19 +788,18 @@ mod tests {
                     | Err(Error::Backend { .. })
                     | Err(Error::NotFound(_))
             ),
-            "list now supported (fails at network layer)"
+            "list supported (fails at network layer)"
         );
 
-        let dummy = SecretString::new("x".into());
+        let dummy = SecretString::new(r#"{"password":"x}"#.into());
         assert!(
             matches!(
                 backend.put(&url, &dummy),
-                Err(Error::UnsupportedOperation {
-                    scheme: "vault",
-                    operation: "put",
-                })
+                Err(Error::AuthenticationFailed(_))
+                    | Err(Error::Backend { .. })
+                    | Err(Error::NotFound(_))
             ),
-            "put remains deferred"
+            "put now supported (fails at network layer)"
         );
     }
 }

@@ -294,51 +294,64 @@ impl Backend for GcpSmBackend {
         let gcp_url = GcpSmUrl::try_from(url)?;
         let token = self.token()?;
 
-        let request_url = format!(
+        let mut request_url = format!(
             "{}/projects/{}/secrets",
             Self::BASE_URL,
             gcp_url.project_id,
         );
 
         let client = self.client();
-        let response = client
-            .get(&request_url)
-            .bearer_auth(&token)
-            .send()
-            .map_err(map_reqwest_error)?;
-
-        let status = response.status();
-        if !status.is_success() {
-            return Err(map_http_status(status, url));
-        }
-
-        let payload: SecretListResponse = response.json().map_err(|e| Error::Backend {
-            scheme: Self::SCHEME,
-            kind: BackendFailureKind::Permanent,
-            message: format!("invalid JSON from GCP Secret Manager list: {e}"),
-        })?;
-
         let mut entries = Vec::new();
-        for secret in payload.secrets.into_iter().flatten() {
-            let name = secret.name;
-            if name.is_empty() {
-                continue;
+        const MAX_PAGES: usize = 500;
+
+        for _ in 0..MAX_PAGES {
+            let response = client
+                .get(&request_url)
+                .bearer_auth(&token)
+                .send()
+                .map_err(map_reqwest_error)?;
+
+            let status = response.status();
+            if !status.is_success() {
+                return Err(map_http_status(status, url));
             }
-            let entry_url = Url::parse(&format!(
-                "gcp-sm://{}/{name}",
-                gcp_url.project_id,
-            ))
-            .map_err(|e| Error::Backend {
+
+            let payload: SecretListResponse = response.json().map_err(|e| Error::Backend {
                 scheme: Self::SCHEME,
                 kind: BackendFailureKind::Permanent,
-                message: format!("failed to build list entry URL: {e}"),
+                message: format!("invalid JSON from GCP Secret Manager list: {e}"),
             })?;
-            entries.push(Entry { name, url: entry_url });
+
+            for secret in payload.secrets.into_iter().flatten() {
+                let name = secret.name;
+                if name.is_empty() {
+                    continue;
+                }
+                let entry_url = Url::parse(&format!(
+                    "gcp-sm://{}/{name}",
+                    gcp_url.project_id,
+                ))
+                .map_err(|e| Error::Backend {
+                    scheme: Self::SCHEME,
+                    kind: BackendFailureKind::Permanent,
+                    message: format!("failed to build list entry URL: {e}"),
+                })?;
+                entries.push(Entry { name, url: entry_url });
+            }
+
+            match payload.next_page_token {
+                Some(ref t) if !t.is_empty() => {
+                    request_url = format!(
+                        "{}/projects/{}/secrets?pageToken={}",
+                        Self::BASE_URL,
+                        gcp_url.project_id,
+                        t,
+                    );
+                }
+                _ => break,
+            }
         }
 
-        // List responses are paginated via `nextPageToken`. Full
-        // pagination following is not implemented in this pass.
-        // Reference: https://cloud.google.com/secret-manager/docs/reference/rest/v1/projects.secrets/list
         Ok(entries)
     }
 
@@ -410,11 +423,13 @@ struct SecretData {
 /// Response body from the GCP Secret Manager `ListSecrets` endpoint.
 ///
 /// `secrets` is an array of secret metadata. `nextPageToken` is the token
-/// for the next page; pagination following is not implemented in this pass.
+/// for the next page; it is followed transparently up to a bounded limit.
 #[derive(Debug, Deserialize)]
 struct SecretListResponse {
     #[serde(default)]
     secrets: Option<Vec<SecretListItem>>,
+    #[serde(rename = "nextPageToken")]
+    next_page_token: Option<String>,
 }
 
 /// A single secret entry in the GCP Secret Manager list response.
@@ -598,6 +613,17 @@ mod tests {
         // because no GCP credentials are configured in unit tests.
         // Constructing a reqwest::Client without initializing rustls would
         // panic; verifying the backend type is sufficient here.
+    }
+
+    #[test]
+    fn list_parsing_with_next_page_token() {
+        let payload: SecretListResponse = serde_json::from_str(
+            r#"{"secrets":[{"name":"my-secret"}],"nextPageToken":"abc123"}"#
+        ).unwrap();
+
+        let items = payload.secrets.unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(payload.next_page_token.unwrap(), "abc123");
     }
 
     #[test]

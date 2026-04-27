@@ -132,7 +132,61 @@ fn read_value(value: Option<String>) -> Result<String, String> {
 
 /// Format a `hasp::Error` into a human-readable string for the CLI.
 ///
-/// Never includes secret values.
+/// Never includes secret values. Adds actionable hints for common
+/// error variants so users know what to check next.
 fn fmt_error(err: hasp::Error) -> String {
-    err.to_string()
+    use hasp::BackendFailureKind;
+    match err {
+        hasp::Error::UrlParse(ref e) => {
+            format!("invalid URL: {e}\nHint: ensure the address is a valid URL")
+        }
+        hasp::Error::InvalidUrl(ref msg) => {
+            format!("invalid URL for backend: {msg}\nHint: check the URL grammar for the scheme")
+        }
+        hasp::Error::UnknownScheme(ref scheme) => {
+            format!(
+                "unsupported scheme: {scheme}\nHint: register the backend or enable the Cargo feature"
+            )
+        }
+        hasp::Error::UnsupportedOperation { scheme, operation } => {
+            format!("{scheme} does not support {operation}")
+        }
+        hasp::Error::NotFound(ref msg) => {
+            format!(
+                "not found: {msg}\nHint: verify the secret name and that backend credentials have access"
+            )
+        }
+        hasp::Error::PermissionDenied(ref msg) => {
+            format!(
+                "permission denied: {msg}\nHint: check IAM / RBAC policies for this resource"
+            )
+        }
+        hasp::Error::AuthenticationFailed(ref msg) => {
+            format!(
+                "authentication failed: {msg}\nHint: ensure ambient credentials are configured for this backend"
+            )
+        }
+        hasp::Error::PreconditionFailed(ref msg) => {
+            format!(
+                "precondition failed: {msg}\nHint: the resource may be in an incompatible state (e.g., soft-deleted)"
+            )
+        }
+        hasp::Error::Backend {
+            ref scheme,
+            kind,
+            ref message,
+        } => match kind {
+            BackendFailureKind::Throttled => format!(
+                "backend '{scheme}' throttled: {message}\nHint: wait and retry"
+            ),
+            BackendFailureKind::Transient => format!(
+                "backend '{scheme}' failed: {message}\nHint: this is a transient error; retrying may help"
+            ),
+            BackendFailureKind::Permanent => {
+                format!("backend '{scheme}' failed: {message}")
+            }
+            _ => format!("backend '{scheme}' failed: {message}"),
+        },
+        _ => err.to_string(),
+    }
 }
