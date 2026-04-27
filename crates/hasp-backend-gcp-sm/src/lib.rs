@@ -212,15 +212,12 @@ impl Backend for GcpSmBackend {
         // If the data is plain text JSON, it is still base64. We decode
         // to bytes and then interpret as UTF-8, matching the hasp
         // text-oriented contract.
-        let bytes = base64::Engine::decode(
-            &base64::engine::general_purpose::STANDARD,
-            &decoded,
-        )
-        .map_err(|e| Error::Backend {
-            scheme: Self::SCHEME,
-            kind: BackendFailureKind::Permanent,
-            message: format!("failed to decode base64 secret value: {e}"),
-        })?;
+        let bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &decoded)
+            .map_err(|e| Error::Backend {
+                scheme: Self::SCHEME,
+                kind: BackendFailureKind::Permanent,
+                message: format!("failed to decode base64 secret value: {e}"),
+            })?;
 
         let text = String::from_utf8(bytes).map_err(|e| Error::Backend {
             scheme: Self::SCHEME,
@@ -241,11 +238,7 @@ impl Backend for GcpSmBackend {
         let token = self.token()?;
 
         // Try to create the secret. If it already exists (409), skip.
-        let create_url = format!(
-            "{}/projects/{}/secrets",
-            Self::BASE_URL,
-            gcp_url.project_id,
-        );
+        let create_url = format!("{}/projects/{}/secrets", Self::BASE_URL, gcp_url.project_id,);
 
         let create_body = serde_json::json!({
             "replication": { "automatic": {} },
@@ -299,11 +292,8 @@ impl Backend for GcpSmBackend {
         let gcp_url = GcpSmUrl::try_from(url)?;
         let token = self.token()?;
 
-        let mut request_url = format!(
-            "{}/projects/{}/secrets",
-            Self::BASE_URL,
-            gcp_url.project_id,
-        );
+        let mut request_url =
+            format!("{}/projects/{}/secrets", Self::BASE_URL, gcp_url.project_id,);
 
         let client = self.client();
         let mut entries = Vec::new();
@@ -332,16 +322,16 @@ impl Backend for GcpSmBackend {
                 if name.is_empty() {
                     continue;
                 }
-                let entry_url = Url::parse(&format!(
-                    "gcp-sm://{}/{name}",
-                    gcp_url.project_id,
-                ))
-                .map_err(|e| Error::Backend {
-                    scheme: Self::SCHEME,
-                    kind: BackendFailureKind::Permanent,
-                    message: format!("failed to build list entry URL: {e}"),
-                })?;
-                entries.push(Entry { name, url: entry_url });
+                let entry_url = Url::parse(&format!("gcp-sm://{}/{name}", gcp_url.project_id,))
+                    .map_err(|e| Error::Backend {
+                        scheme: Self::SCHEME,
+                        kind: BackendFailureKind::Permanent,
+                        message: format!("failed to build list entry URL: {e}"),
+                    })?;
+                entries.push(Entry {
+                    name,
+                    url: entry_url,
+                });
             }
 
             match payload.next_page_token {
@@ -477,12 +467,12 @@ fn map_reqwest_error(err: reqwest::Error) -> Error {
 fn map_http_status(status: reqwest::StatusCode, url: &Url) -> Error {
     match status {
         reqwest::StatusCode::NOT_FOUND => Error::NotFound(url.to_string()),
-        reqwest::StatusCode::FORBIDDEN => Error::PermissionDenied(format!(
-            "gcp-sm:// permission denied for {url}"
-        )),
-        reqwest::StatusCode::UNAUTHORIZED => Error::AuthenticationFailed(format!(
-            "gcp-sm:// authentication failed for {url}"
-        )),
+        reqwest::StatusCode::FORBIDDEN => {
+            Error::PermissionDenied(format!("gcp-sm:// permission denied for {url}"))
+        }
+        reqwest::StatusCode::UNAUTHORIZED => {
+            Error::AuthenticationFailed(format!("gcp-sm:// authentication failed for {url}"))
+        }
         reqwest::StatusCode::TOO_MANY_REQUESTS => Error::Backend {
             scheme: "gcp-sm",
             kind: BackendFailureKind::Throttled,
@@ -493,12 +483,12 @@ fn map_http_status(status: reqwest::StatusCode, url: &Url) -> Error {
             kind: BackendFailureKind::Transient,
             message: format!("GCP Secret Manager returned HTTP {status}"),
         },
-        status if status.as_u16() == 409 => Error::PreconditionFailed(format!(
-            "gcp-sm:// precondition failed (HTTP {status})"
-        )),
-        status if status.as_u16() == 400 => Error::InvalidUrl(format!(
-            "gcp-sm:// invalid request (HTTP {status})"
-        )),
+        status if status.as_u16() == 409 => {
+            Error::PreconditionFailed(format!("gcp-sm:// precondition failed (HTTP {status})"))
+        }
+        status if status.as_u16() == 400 => {
+            Error::InvalidUrl(format!("gcp-sm:// invalid request (HTTP {status})"))
+        }
         _ => Error::Backend {
             scheme: "gcp-sm",
             kind: BackendFailureKind::Permanent,
@@ -670,9 +660,9 @@ mod tests {
 
     #[test]
     fn list_parsing_with_next_page_token() {
-        let payload: SecretListResponse = serde_json::from_str(
-            r#"{"secrets":[{"name":"my-secret"}],"nextPageToken":"abc123"}"#
-        ).unwrap();
+        let payload: SecretListResponse =
+            serde_json::from_str(r#"{"secrets":[{"name":"my-secret"}],"nextPageToken":"abc123"}"#)
+                .unwrap();
 
         let items = payload.secrets.unwrap();
         assert_eq!(items.len(), 1);

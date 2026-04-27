@@ -427,11 +427,9 @@ fn map_http_status(status: reqwest::StatusCode, url: &Url) -> Error {
             kind: BackendFailureKind::Transient,
             message: format!("Azure Key Vault returned HTTP {status}"),
         },
-        reqwest::StatusCode::CONFLICT => {
-            Error::PreconditionFailed(format!(
-                "azure-kv:// secret is in soft-delete recovery (HTTP {status})"
-            ))
-        }
+        reqwest::StatusCode::CONFLICT => Error::PreconditionFailed(format!(
+            "azure-kv:// secret is in soft-delete recovery (HTTP {status})"
+        )),
         status if status.as_u16() == 400 => {
             Error::InvalidUrl(format!("azure-kv:// invalid request (HTTP {status})"))
         }
@@ -675,7 +673,10 @@ mod tests {
 
         let items = payload.value.unwrap();
         assert_eq!(items.len(), 1);
-        assert_eq!(payload.next_link.unwrap(), "https://my-vault.vault.azure.net/secrets?api-version=7.5&$skiptoken=abc");
+        assert_eq!(
+            payload.next_link.unwrap(),
+            "https://my-vault.vault.azure.net/secrets?api-version=7.5&$skiptoken=abc"
+        );
     }
 
     #[test]

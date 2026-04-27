@@ -268,16 +268,17 @@ async fn list_parameters(aws_url: &AwsSsmUrl) -> Result<Vec<Entry>, Error> {
             }
             let entry_url = Url::parse(&format!(
                 "aws-ssm://{}/{}?with-decryption={}",
-                aws_url.region,
-                name,
-                aws_url.with_decryption,
+                aws_url.region, name, aws_url.with_decryption,
             ))
             .map_err(|e| Error::Backend {
                 scheme: "aws-ssm",
                 kind: BackendFailureKind::Permanent,
                 message: format!("failed to build list entry URL: {e}"),
             })?;
-            entries.push(Entry { name, url: entry_url });
+            entries.push(Entry {
+                name,
+                url: entry_url,
+            });
         }
 
         if next_token.is_none() {

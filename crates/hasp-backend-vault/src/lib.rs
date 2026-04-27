@@ -162,9 +162,7 @@ impl Backend for VaultBackend {
             };
 
             let json_value = serde_json::from_str(value.expose_secret())
-                .unwrap_or_else(|_| {
-                    serde_json::Value::String(value.expose_secret().to_owned())
-                });
+                .unwrap_or_else(|_| serde_json::Value::String(value.expose_secret().to_owned()));
 
             if let Some(map) = obj.as_object_mut() {
                 map.insert(field.clone(), json_value);
@@ -177,8 +175,9 @@ impl Backend for VaultBackend {
             }
             obj
         } else {
-            serde_json::from_str(value.expose_secret())
-                .map_err(|e| Error::InvalidUrl(format!("vault:// put value must be valid JSON: {e}")))?
+            serde_json::from_str(value.expose_secret()).map_err(|e| {
+                Error::InvalidUrl(format!("vault:// put value must be valid JSON: {e}"))
+            })?
         };
 
         let body = serde_json::json!({ "data": data });
@@ -206,7 +205,10 @@ impl Backend for VaultBackend {
         // for the LIST /v1/{mount}/metadata/{prefix} endpoint.
         let path_str = vault_url.path.trim_start_matches('/');
         let prefix = if let Some(after_data) = path_str.strip_prefix("data/") {
-            after_data.rfind('/').map(|i| &after_data[..i]).unwrap_or("")
+            after_data
+                .rfind('/')
+                .map(|i| &after_data[..i])
+                .unwrap_or("")
         } else {
             path_str.rfind('/').map(|i| &path_str[..i]).unwrap_or("")
         };
@@ -217,10 +219,7 @@ impl Backend for VaultBackend {
             format!("/metadata/{prefix}")
         };
 
-        let request_url = build_request_url(&addr,
-            &vault_url.mount,
-            &metadata_path,
-        );
+        let request_url = build_request_url(&addr, &vault_url.mount, &metadata_path);
 
         let client = build_client()?;
         let response = client
@@ -264,8 +263,7 @@ impl Backend for VaultBackend {
             // whole secrets, so strip any ?field= from the original URL.
             let entry_url = if vault_url.path.starts_with("/data/") {
                 let base_path = vault_url.path.trim_start_matches("/data/");
-                let parent =
-                    base_path.rfind('/').map(|i| &base_path[..i]).unwrap_or("");
+                let parent = base_path.rfind('/').map(|i| &base_path[..i]).unwrap_or("");
                 format!("vault://{}/data/{}/{name}", vault_url.mount, parent)
             } else {
                 format!("vault://{}/{name}", vault_url.mount)
@@ -287,10 +285,7 @@ impl Backend for VaultBackend {
         check_ambient_credentials()?;
         let vault_url = VaultUrl::try_from(url)?;
         let (token, addr) = ambient_credentials()?;
-        let request_url = build_request_url(&addr,
-            &vault_url.mount,
-            &vault_url.path,
-        );
+        let request_url = build_request_url(&addr, &vault_url.mount, &vault_url.path);
 
         let client = build_client()?;
         let response = client
@@ -431,10 +426,12 @@ fn extract_secret(body: &serde_json::Value, field: Option<&str>) -> Result<Secre
 
     let value = match field {
         Some(f) => {
-            let v = data.get(f).ok_or_else(|| {
-                Error::NotFound(format!("field '{f}' not found in secret"))
-            })?;
-            v.as_str().map(|s| s.to_owned()).unwrap_or_else(|| v.to_string())
+            let v = data
+                .get(f)
+                .ok_or_else(|| Error::NotFound(format!("field '{f}' not found in secret")))?;
+            v.as_str()
+                .map(|s| s.to_owned())
+                .unwrap_or_else(|| v.to_string())
         }
         None => data.to_string(),
     };
@@ -761,7 +758,10 @@ mod tests {
 
         let err = backend.put(&url, &dummy).unwrap_err();
         assert!(
-            matches!(err, Error::Backend { .. } | Error::NotFound(_) | Error::AuthenticationFailed(_)),
+            matches!(
+                err,
+                Error::Backend { .. } | Error::NotFound(_) | Error::AuthenticationFailed(_)
+            ),
             "expected network-layer error for put with field, got: {err:?}"
         );
     }

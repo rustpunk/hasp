@@ -322,11 +322,13 @@ async fn list_secrets(aws_url: &AwsSmUrl) -> Result<Vec<Entry>, Error> {
             if name.is_empty() {
                 continue;
             }
-            let entry_url = Url::parse(&format!("aws-sm://{}/{name}", aws_url.region))
-                .map_err(|e| Error::Backend {
-                    scheme: "aws-sm",
-                    kind: BackendFailureKind::Permanent,
-                    message: format!("failed to build list entry URL: {e}"),
+            let entry_url =
+                Url::parse(&format!("aws-sm://{}/{name}", aws_url.region)).map_err(|e| {
+                    Error::Backend {
+                        scheme: "aws-sm",
+                        kind: BackendFailureKind::Permanent,
+                        message: format!("failed to build list entry URL: {e}"),
+                    }
                 })?;
             entries.push(Entry {
                 name,
@@ -684,9 +686,7 @@ mod tests {
     #[test]
     fn error_map_encryption_failure_is_precondition_failed() {
         let err = from_service_error("EncryptionFailure", "kms failure");
-        assert!(
-            matches!(err, Error::PreconditionFailed(ref s) if s.contains("kms failure"))
-        );
+        assert!(matches!(err, Error::PreconditionFailed(ref s) if s.contains("kms failure")));
     }
 
     #[test]

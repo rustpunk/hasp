@@ -56,15 +56,19 @@ impl TryFrom<&Url> for BwUrl {
             .ok_or_else(|| Error::InvalidUrl("bw:// requires an item name (host)".into()))?
             .to_owned();
         if item.is_empty() {
-            return Err(Error::InvalidUrl("bw:// item name must not be empty".into()));
+            return Err(Error::InvalidUrl(
+                "bw:// item name must not be empty".into(),
+            ));
         }
 
         let mut segments = url.path_segments().into_iter().flatten();
-        let field_path = segments
-            .next()
-            .ok_or_else(|| Error::InvalidUrl("bw:// requires a field path (path segment)".into()))?;
+        let field_path = segments.next().ok_or_else(|| {
+            Error::InvalidUrl("bw:// requires a field path (path segment)".into())
+        })?;
         if field_path.is_empty() {
-            return Err(Error::InvalidUrl("bw:// field path must not be empty".into()));
+            return Err(Error::InvalidUrl(
+                "bw:// field path must not be empty".into(),
+            ));
         }
 
         if segments.next().is_some() {
@@ -171,13 +175,11 @@ impl Backend for BwBackend {
         let reference = format!("bw://{}/{}", bw_url.item, bw_url.field_path);
         let envelope = get_item_envelope(&bw_url.item, GET_TIMEOUT, &reference)?;
 
-        let data = envelope
-            .get("data")
-            .ok_or_else(|| Error::Backend {
-                scheme: "bw",
-                kind: BackendFailureKind::Permanent,
-                message: "bw response missing data field".into(),
-            })?;
+        let data = envelope.get("data").ok_or_else(|| Error::Backend {
+            scheme: "bw",
+            kind: BackendFailureKind::Permanent,
+            message: "bw response missing data field".into(),
+        })?;
 
         let secret = extract_field(data, &bw_url.field_path, &reference)?;
         Ok(SecretString::new(secret.into()))
@@ -248,13 +250,12 @@ fn get_item_envelope(
         timeout,
     )?;
 
-    let envelope: serde_json::Value = serde_json::from_slice(&output.stdout).map_err(|e| {
-        Error::Backend {
+    let envelope: serde_json::Value =
+        serde_json::from_slice(&output.stdout).map_err(|e| Error::Backend {
             scheme: "bw",
             kind: BackendFailureKind::Permanent,
             message: format!("bw produced invalid JSON: {e}"),
-        }
-    })?;
+        })?;
 
     let success = envelope
         .get("success")
@@ -277,10 +278,7 @@ fn get_item_envelope(
 /// Two reader threads consume stdout and stderr concurrently while the
 /// main thread polls `try_wait`. This prevents pipe-buffer deadlock when
 /// `bw` emits large JSON or when stderr is verbose.
-fn run_bw_with_timeout(
-    args: &[&str],
-    timeout: Duration,
-) -> Result<std::process::Output, Error> {
+fn run_bw_with_timeout(args: &[&str], timeout: Duration) -> Result<std::process::Output, Error> {
     let mut child = Command::new("bw")
         .args(args)
         .stdout(Stdio::piped())
@@ -456,9 +454,7 @@ fn extract_field(data: &serde_json::Value, path: &str, reference: &str) -> Resul
         }
         if let Ok(index) = segment.parse::<usize>() {
             current = current.get(index).ok_or_else(|| {
-                Error::NotFound(format!(
-                    "field index {index} out of bounds in {reference}"
-                ))
+                Error::NotFound(format!("field index {index} out of bounds in {reference}"))
             })?;
         } else {
             current = current.get(segment).ok_or_else(|| {
@@ -547,9 +543,7 @@ mod tests {
     #[test]
     fn error_map_not_found() {
         let err = map_bw_response_error("Not found.", "bw://github.com/login.password");
-        assert!(
-            matches!(err, Error::NotFound(ref s) if s == "bw://github.com/login.password")
-        );
+        assert!(matches!(err, Error::NotFound(ref s) if s == "bw://github.com/login.password"));
     }
 
     #[test]
@@ -569,8 +563,7 @@ mod tests {
 
     #[test]
     fn error_map_not_logged_in() {
-        let err =
-            map_bw_response_error("You are not logged in.", "bw://github.com/login.password");
+        let err = map_bw_response_error("You are not logged in.", "bw://github.com/login.password");
         assert!(matches!(err, Error::AuthenticationFailed(_)));
     }
 
