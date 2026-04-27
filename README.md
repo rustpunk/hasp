@@ -52,6 +52,17 @@ cargo install hasp-cli
 cargo add hasp
 ```
 
+### Documentation
+
+Full user documentation is an mdbook in `docs/`:
+
+```bash
+cargo install mdbook
+mdbook serve docs --open
+```
+
+Or read it online at `https://rustpunk.github.io/hasp/`.
+
 The library is the source of truth; the CLI is a thin shell over the
 public library API. Both are first-class surfaces.
 

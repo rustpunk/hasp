@@ -1,0 +1,23 @@
+[book]
+title = "Hasp"
+description = "Unified secrets CLI — one tool for every secret store."
+authors = ["rustpunk"]
+language = "en"
+src = "src"
+
+[preprocessor.index]
+
+[preprocessor.links]
+
+[output.html]
+default-theme = "navy"
+git-repository-url = "https://github.com/rustpunk/hasp"
+edit-url-template = "https://github.com/rustpunk/hasp/edit/main/docs/src/{path}"
+site-url = "/hasp/"
+
+[output.html.playground]
+runnable = false
+
+[output.html.fold]
+enable = true
+level = 0
