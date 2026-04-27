@@ -17,8 +17,9 @@ This is a name reservation for the `hasp` crate. The implementation is in develo
 ## Scope
 
 `hasp` is a unified `get` / `put` / `list` / `delete` / `exists` for
-**keyed secret stores**. URL addressing parallels its sibling
-[`ferrule`](https://github.com/rustpunk/ferrule):
+**keyed secret stores**, shipping as both a **Rust library** (`hasp` crate)
+and a **CLI binary** (`hasp-cli` crate). URL addressing parallels its
+sibling [`ferrule`](https://github.com/rustpunk/ferrule):
 
 ```
 keyring://service/account/key
@@ -41,6 +42,19 @@ hasp put @prod/db-password -          # value from stdin
 hasp ls  @prod
 ```
 
+### Installation
+
+```bash
+# CLI (all backends)
+cargo install hasp-cli
+
+# Library only
+cargo add hasp
+```
+
+The library is the source of truth; the CLI is a thin shell over the
+public library API. Both are first-class surfaces.
+
 ### Out of scope (handled elsewhere)
 
 - Secret rotation — operational concern, separate tool.
@@ -52,7 +66,9 @@ hasp ls  @prod
 
 ## Status
 
-Pre-release placeholder at `0.1.0-alpha`.
+`0.1.0-alpha` — all five CRUD verbs (`get` / `put` / `list` / `delete` /
+`exists`) are implemented across every backend. The CLI is functional.
+Library API is stabilising before a `0.1.0` release.
 
 ## License
 

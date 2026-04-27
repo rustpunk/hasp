@@ -57,11 +57,6 @@ impl TryFrom<&Url> for AwsSmUrl {
         }
 
         let secret_name = url.path().trim_start_matches('/').to_owned();
-        if secret_name.is_empty() {
-            return Err(Error::InvalidUrl(
-                "aws-sm:// secret name must not be empty".into(),
-            ));
-        }
 
         let mut version_stage = None;
         let mut version_id = None;
@@ -150,11 +145,21 @@ impl Backend for AwsSmBackend {
 
     fn get(&self, url: &Url) -> Result<SecretString, Error> {
         let aws_url = AwsSmUrl::try_from(url)?;
+        if aws_url.secret_name.is_empty() {
+            return Err(Error::InvalidUrl(
+                "aws-sm:// secret name must not be empty".into(),
+            ));
+        }
         self.block_on(get_secret(&aws_url))?
     }
 
     fn put(&self, url: &Url, value: &SecretString) -> Result<(), Error> {
         let aws_url = AwsSmUrl::try_from(url)?;
+        if aws_url.secret_name.is_empty() {
+            return Err(Error::InvalidUrl(
+                "aws-sm:// secret name must not be empty".into(),
+            ));
+        }
         self.block_on(put_secret(&aws_url, value.expose_secret()))?
     }
 
@@ -165,11 +170,21 @@ impl Backend for AwsSmBackend {
 
     fn delete(&self, url: &Url) -> Result<(), Error> {
         let aws_url = AwsSmUrl::try_from(url)?;
+        if aws_url.secret_name.is_empty() {
+            return Err(Error::InvalidUrl(
+                "aws-sm:// secret name must not be empty".into(),
+            ));
+        }
         self.block_on(delete_secret(&aws_url))?
     }
 
     fn exists(&self, url: &Url) -> Result<bool, Error> {
         let aws_url = AwsSmUrl::try_from(url)?;
+        if aws_url.secret_name.is_empty() {
+            return Err(Error::InvalidUrl(
+                "aws-sm:// secret name must not be empty".into(),
+            ));
+        }
         match self.block_on(describe_secret(&aws_url))? {
             Ok(()) => Ok(true),
             Err(Error::NotFound(_)) => Ok(false),
@@ -536,9 +551,46 @@ mod tests {
     }
 
     #[test]
-    fn parse_empty_path_fails() {
+    fn parse_empty_path_allowed_for_list() {
         let url = Url::parse("aws-sm://us-east-1/").unwrap();
-        assert!(AwsSmUrl::try_from(&url).is_err());
+        let aws = AwsSmUrl::try_from(&url).unwrap();
+        assert_eq!(aws.region, "us-east-1");
+        assert_eq!(aws.secret_name, "");
+    }
+
+    #[test]
+    fn empty_secret_name_fails_at_operation() {
+        let backend = AwsSmBackend::new();
+        let url = Url::parse("aws-sm://us-east-1/").unwrap();
+        let dummy = SecretString::new("x".into());
+        assert!(
+            matches!(
+                backend.get(&url),
+                Err(Error::InvalidUrl(ref s)) if s.contains("secret name must not be empty")
+            ),
+            "empty secret name should fail at operation boundary"
+        );
+        assert!(
+            matches!(
+                backend.put(&url, &dummy),
+                Err(Error::InvalidUrl(ref s)) if s.contains("secret name must not be empty")
+            ),
+            "empty secret name should fail at operation boundary for put"
+        );
+        assert!(
+            matches!(
+                backend.delete(&url),
+                Err(Error::InvalidUrl(ref s)) if s.contains("secret name must not be empty")
+            ),
+            "empty secret name should fail at operation boundary for delete"
+        );
+        assert!(
+            matches!(
+                backend.exists(&url),
+                Err(Error::InvalidUrl(ref s)) if s.contains("secret name must not be empty")
+            ),
+            "empty secret name should fail at operation boundary for exists"
+        );
     }
 
     #[test]

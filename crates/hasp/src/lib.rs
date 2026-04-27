@@ -382,6 +382,13 @@ impl Store {
 
     /// List entries matching the URL.
     ///
+    /// For backends that support prefix filtering (all backends), the
+    /// path component of the URL is used as a prefix: only entries whose
+    /// name or path starts with the given prefix are returned. Backends
+    /// that natively filter by prefix (SSM, Vault) are unchanged; backends
+    /// that return a flat project/region scope (AWS SM, GCP SM, Azure KV)
+    /// get client-side filtering applied automatically.
+    ///
     /// # Errors
     ///
     /// Returns `Error::UnknownScheme` if no backend handles the URL's scheme.
@@ -392,7 +399,18 @@ impl Store {
             .backends
             .get(scheme)
             .ok_or_else(|| Error::UnknownScheme(scheme.to_owned()))?;
-        backend.list(&url)
+        let mut entries = backend.list(&url)?;
+
+        let prefix = url.path().trim_start_matches('/').trim_end_matches('/');
+        if !prefix.is_empty() {
+            let prefix_with_slash = format!("{prefix}/");
+            entries.retain(|e| {
+                let entry_path = e.url.path().trim_start_matches('/').trim_end_matches('/');
+                entry_path == prefix || entry_path.starts_with(&prefix_with_slash)
+            });
+        }
+
+        Ok(entries)
     }
 
     /// Delete a secret by URL.

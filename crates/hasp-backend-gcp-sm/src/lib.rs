@@ -47,11 +47,6 @@ impl TryFrom<&Url> for GcpSmUrl {
         }
 
         let secret_id = url.path().trim_start_matches('/').to_owned();
-        if secret_id.is_empty() {
-            return Err(Error::InvalidUrl(
-                "gcp-sm:// secret-id must not be empty".into(),
-            ));
-        }
 
         let mut version = String::from("latest");
 
@@ -171,6 +166,11 @@ impl Backend for GcpSmBackend {
 
     fn get(&self, url: &Url) -> Result<SecretString, Error> {
         let gcp_url = GcpSmUrl::try_from(url)?;
+        if gcp_url.secret_id.is_empty() {
+            return Err(Error::InvalidUrl(
+                "gcp-sm:// secret-id must not be empty".into(),
+            ));
+        }
         let token = self.token()?;
 
         let request_url = format!(
@@ -233,6 +233,11 @@ impl Backend for GcpSmBackend {
 
     fn put(&self, url: &Url, value: &SecretString) -> Result<(), Error> {
         let gcp_url = GcpSmUrl::try_from(url)?;
+        if gcp_url.secret_id.is_empty() {
+            return Err(Error::InvalidUrl(
+                "gcp-sm:// secret-id must not be empty".into(),
+            ));
+        }
         let token = self.token()?;
 
         // Try to create the secret. If it already exists (409), skip.
@@ -357,6 +362,11 @@ impl Backend for GcpSmBackend {
 
     fn delete(&self, url: &Url) -> Result<(), Error> {
         let gcp_url = GcpSmUrl::try_from(url)?;
+        if gcp_url.secret_id.is_empty() {
+            return Err(Error::InvalidUrl(
+                "gcp-sm:// secret-id must not be empty".into(),
+            ));
+        }
         let token = self.token()?;
 
         let request_url = format!(
@@ -382,6 +392,11 @@ impl Backend for GcpSmBackend {
 
     fn exists(&self, url: &Url) -> Result<bool, Error> {
         let gcp_url = GcpSmUrl::try_from(url)?;
+        if gcp_url.secret_id.is_empty() {
+            return Err(Error::InvalidUrl(
+                "gcp-sm:// secret-id must not be empty".into(),
+            ));
+        }
         let token = self.token()?;
 
         // A lightweight metadata-only call: GetSecret (not GetSecretVersion).
@@ -526,9 +541,46 @@ mod tests {
     }
 
     #[test]
-    fn parse_empty_path_fails() {
+    fn parse_empty_path_allowed_for_list() {
         let url = Url::parse("gcp-sm://my-project/").unwrap();
-        assert!(GcpSmUrl::try_from(&url).is_err());
+        let gcp = GcpSmUrl::try_from(&url).unwrap();
+        assert_eq!(gcp.project_id, "my-project");
+        assert_eq!(gcp.secret_id, "");
+    }
+
+    #[test]
+    fn empty_secret_id_fails_at_operation() {
+        let backend = GcpSmBackend::new();
+        let url = Url::parse("gcp-sm://my-project/").unwrap();
+        let dummy = SecretString::new("x".into());
+        assert!(
+            matches!(
+                backend.get(&url),
+                Err(Error::InvalidUrl(ref s)) if s.contains("secret-id must not be empty")
+            ),
+            "empty secret-id should fail at operation boundary"
+        );
+        assert!(
+            matches!(
+                backend.put(&url, &dummy),
+                Err(Error::InvalidUrl(ref s)) if s.contains("secret-id must not be empty")
+            ),
+            "empty secret-id should fail at operation boundary for put"
+        );
+        assert!(
+            matches!(
+                backend.delete(&url),
+                Err(Error::InvalidUrl(ref s)) if s.contains("secret-id must not be empty")
+            ),
+            "empty secret-id should fail at operation boundary for delete"
+        );
+        assert!(
+            matches!(
+                backend.exists(&url),
+                Err(Error::InvalidUrl(ref s)) if s.contains("secret-id must not be empty")
+            ),
+            "empty secret-id should fail at operation boundary for exists"
+        );
     }
 
     #[test]
