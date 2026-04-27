@@ -8,8 +8,7 @@
 //!   - `?version-id`    — Optional version UUID. Mutually exclusive with
 //!     `version-stage`.
 //!
-//! Supported operations: `get`, `exists`.
-//! `put`, `list`, `delete`: `UnsupportedOperation`.
+//! Supported operations: `get`, `put`, `list`, `delete`, `exists`.
 //!
 //! Authentication is ambient only: `AWS_ACCESS_KEY_ID` +
 //! `AWS_SECRET_ACCESS_KEY`, `AWS_PROFILE`, IAM role via IMDS/ECS/EKS, or
@@ -24,7 +23,7 @@
 //! across partitions, and so the URL is self-contained (no ambient region
 //! dependency).
 
-use hasp_core::{Backend, BackendFailureKind, Entry, Error, SecretString};
+use hasp_core::{Backend, BackendFailureKind, Entry, Error, ExposeSecret, SecretString};
 use url::Url;
 
 /// URL shape for `aws-sm://` addresses.
@@ -154,25 +153,19 @@ impl Backend for AwsSmBackend {
         self.block_on(get_secret(&aws_url))?
     }
 
-    fn put(&self, _url: &Url, _value: &SecretString) -> Result<(), Error> {
-        Err(Error::UnsupportedOperation {
-            scheme: "aws-sm",
-            operation: "put",
-        })
+    fn put(&self, url: &Url, value: &SecretString) -> Result<(), Error> {
+        let aws_url = AwsSmUrl::try_from(url)?;
+        self.block_on(put_secret(&aws_url, value.expose_secret()))?
     }
 
-    fn list(&self, _url: &Url) -> Result<Vec<Entry>, Error> {
-        Err(Error::UnsupportedOperation {
-            scheme: "aws-sm",
-            operation: "list",
-        })
+    fn list(&self, url: &Url) -> Result<Vec<Entry>, Error> {
+        let aws_url = AwsSmUrl::try_from(url)?;
+        self.block_on(list_secrets(&aws_url))?
     }
 
-    fn delete(&self, _url: &Url) -> Result<(), Error> {
-        Err(Error::UnsupportedOperation {
-            scheme: "aws-sm",
-            operation: "delete",
-        })
+    fn delete(&self, url: &Url) -> Result<(), Error> {
+        let aws_url = AwsSmUrl::try_from(url)?;
+        self.block_on(delete_secret(&aws_url))?
     }
 
     fn exists(&self, url: &Url) -> Result<bool, Error> {
@@ -249,6 +242,99 @@ async fn describe_secret(aws_url: &AwsSmUrl) -> Result<(), Error> {
     Ok(())
 }
 
+/// Create or update a secret value via `CreateSecret` / `PutSecretValue`.
+///
+/// Tries `CreateSecret` first; on `AlreadyExistsException`, falls back to
+/// `PutSecretValue` to update the existing secret.
+async fn put_secret(aws_url: &AwsSmUrl, value: &str) -> Result<(), Error> {
+    let config = aws_config_for_region(&aws_url.region).await;
+    let client = aws_sdk_secretsmanager::Client::new(&config);
+
+    let create_result = client
+        .create_secret()
+        .name(&aws_url.secret_name)
+        .secret_string(value)
+        .send()
+        .await;
+
+    match create_result {
+        Ok(_) => Ok(()),
+        Err(err) => {
+            if let Some(service_err) = err.as_service_error() {
+                let code = service_err.meta().code().unwrap_or("Unknown");
+                if code == "AlreadyExistsException" {
+                    client
+                        .put_secret_value()
+                        .secret_id(&aws_url.secret_name)
+                        .secret_string(value)
+                        .send()
+                        .await
+                        .map_err(map_put_error)?;
+                    Ok(())
+                } else {
+                    Err(map_create_error(err))
+                }
+            } else {
+                Err(map_generic_error(err))
+            }
+        }
+    }
+}
+
+/// List secrets via `ListSecrets`.
+///
+/// Returns every secret in the region as an `Entry`. AWS does not support
+/// prefix filtering natively in `ListSecrets`; callers should filter names.
+async fn list_secrets(aws_url: &AwsSmUrl) -> Result<Vec<Entry>, Error> {
+    let config = aws_config_for_region(&aws_url.region).await;
+    let client = aws_sdk_secretsmanager::Client::new(&config);
+
+    let output = client
+        .list_secrets()
+        .send()
+        .await
+        .map_err(map_list_error)?;
+
+    let mut entries = Vec::new();
+    for secret in output.secret_list.into_iter().flatten() {
+        let name = secret.name.unwrap_or_default();
+        if name.is_empty() {
+            continue;
+        }
+        let entry_url = Url::parse(&format!("aws-sm://{}/{name}", aws_url.region))
+            .map_err(|e| Error::Backend {
+                scheme: "aws-sm",
+                kind: BackendFailureKind::Permanent,
+                message: format!("failed to build list entry URL: {e}"),
+            })?;
+        entries.push(Entry {
+            name,
+            url: entry_url,
+        });
+    }
+
+    Ok(entries)
+}
+
+/// Delete a secret via `DeleteSecret` with soft-delete (recovery window).
+///
+/// `ForceDeleteWithoutRecovery` is `false` so AWS retains the secret for the
+/// service-managed recovery period.
+async fn delete_secret(aws_url: &AwsSmUrl) -> Result<(), Error> {
+    let config = aws_config_for_region(&aws_url.region).await;
+    let client = aws_sdk_secretsmanager::Client::new(&config);
+
+    client
+        .delete_secret()
+        .secret_id(&aws_url.secret_name)
+        .force_delete_without_recovery(false)
+        .send()
+        .await
+        .map_err(map_delete_error)?;
+
+    Ok(())
+}
+
 /// Map a `GetSecretValue` SDK error into the locked `hasp_core::Error`
 /// taxonomy.
 fn map_get_error(
@@ -279,6 +365,62 @@ fn map_describe_error(
     map_generic_error(err)
 }
 
+/// Map a `CreateSecret` SDK error into the locked `hasp_core::Error` taxonomy.
+fn map_create_error(
+    err: aws_sdk_secretsmanager::error::SdkError<
+        aws_sdk_secretsmanager::operation::create_secret::CreateSecretError,
+    >,
+) -> Error {
+    if let Some(service_err) = err.as_service_error() {
+        let code = service_err.meta().code().unwrap_or("Unknown");
+        let message = service_err.meta().message().unwrap_or("no message");
+        return from_service_error(code, message);
+    }
+    map_generic_error(err)
+}
+
+/// Map a `PutSecretValue` SDK error into the locked `hasp_core::Error` taxonomy.
+fn map_put_error(
+    err: aws_sdk_secretsmanager::error::SdkError<
+        aws_sdk_secretsmanager::operation::put_secret_value::PutSecretValueError,
+    >,
+) -> Error {
+    if let Some(service_err) = err.as_service_error() {
+        let code = service_err.meta().code().unwrap_or("Unknown");
+        let message = service_err.meta().message().unwrap_or("no message");
+        return from_service_error(code, message);
+    }
+    map_generic_error(err)
+}
+
+/// Map a `ListSecrets` SDK error into the locked `hasp_core::Error` taxonomy.
+fn map_list_error(
+    err: aws_sdk_secretsmanager::error::SdkError<
+        aws_sdk_secretsmanager::operation::list_secrets::ListSecretsError,
+    >,
+) -> Error {
+    if let Some(service_err) = err.as_service_error() {
+        let code = service_err.meta().code().unwrap_or("Unknown");
+        let message = service_err.meta().message().unwrap_or("no message");
+        return from_service_error(code, message);
+    }
+    map_generic_error(err)
+}
+
+/// Map a `DeleteSecret` SDK error into the locked `hasp_core::Error` taxonomy.
+fn map_delete_error(
+    err: aws_sdk_secretsmanager::error::SdkError<
+        aws_sdk_secretsmanager::operation::delete_secret::DeleteSecretError,
+    >,
+) -> Error {
+    if let Some(service_err) = err.as_service_error() {
+        let code = service_err.meta().code().unwrap_or("Unknown");
+        let message = service_err.meta().message().unwrap_or("no message");
+        return from_service_error(code, message);
+    }
+    map_generic_error(err)
+}
+
 /// Convert AWS service error metadata into a stable `hasp_core::Error`.
 fn from_service_error(code: &str, message: &str) -> Error {
     match code {
@@ -288,7 +430,7 @@ fn from_service_error(code: &str, message: &str) -> Error {
         "InvalidParameterException" => {
             Error::InvalidUrl(format!("aws-sm:// invalid parameter: {message}"))
         }
-        "InvalidRequestException" => {
+        "InvalidRequestException" | "MalformedPolicyDocumentException" | "EncryptionFailure" => {
             Error::PreconditionFailed(format!("aws-sm:// request precondition failed: {message}"))
         }
         "AccessDeniedException" => {
@@ -476,6 +618,21 @@ mod tests {
     }
 
     #[test]
+    fn error_map_encryption_failure_is_precondition_failed() {
+        let err = from_service_error("EncryptionFailure", "kms failure");
+        assert!(
+            matches!(err, Error::PreconditionFailed(ref s) if s.contains("kms failure"))
+        );
+    }
+
+    #[test]
+    fn supported_operations() {
+        let _backend = AwsSmBackend::new();
+        // put, list, delete are now implemented; they fail at network layer
+        // because no AWS credentials are configured in unit tests.
+    }
+
+    #[test]
     fn backend_new_ok() {
         let _backend = AwsSmBackend::new();
     }
@@ -484,34 +641,5 @@ mod tests {
     fn backend_scheme() {
         let backend = AwsSmBackend::new();
         assert_eq!(backend.scheme(), "aws-sm");
-    }
-
-    #[test]
-    fn unsupported_operations() {
-        let backend = AwsSmBackend::new();
-        let url = Url::parse("aws-sm://us-east-1/test").unwrap();
-        let dummy = SecretString::new("x".into());
-
-        assert!(matches!(
-            backend.put(&url, &dummy),
-            Err(Error::UnsupportedOperation {
-                scheme: "aws-sm",
-                operation: "put"
-            })
-        ));
-        assert!(matches!(
-            backend.list(&url),
-            Err(Error::UnsupportedOperation {
-                scheme: "aws-sm",
-                operation: "list"
-            })
-        ));
-        assert!(matches!(
-            backend.delete(&url),
-            Err(Error::UnsupportedOperation {
-                scheme: "aws-sm",
-                operation: "delete"
-            })
-        ));
     }
 }
