@@ -25,6 +25,10 @@ struct Cli {
     /// Increase output verbosity (can be used multiple times).
     #[arg(short, long, global = true, action = ArgAction::Count)]
     verbose: u8,
+
+    /// HTTP CONNECT proxy URL.
+    #[arg(long, global = true)]
+    proxy_url: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -93,14 +97,18 @@ fn main() {
 }
 
 fn run(cli: Cli) -> Result<(), String> {
-    let store = hasp::Store::with_defaults();
+    let profiles =
+        profiles::load_profiles().map_err(|e| format!("failed to load profiles: {e}"))?;
+
+    let proxy = resolve_proxy(&cli, &profiles)?;
+    let store = hasp::StoreBuilder::with_defaults().proxy(proxy).build();
 
     match cli.command {
         Command::Get { address } => {
             if cli.verbose > 0 && !cli.quiet {
                 eprintln!("hasp: get {address}");
             }
-            let url = resolve(&address)?;
+            let url = resolve(&address, &profiles)?;
             let secret = store.get(&url).map_err(fmt_error)?;
             println!("{}", secret.expose_secret());
         }
@@ -108,7 +116,7 @@ fn run(cli: Cli) -> Result<(), String> {
             if cli.verbose > 0 && !cli.quiet {
                 eprintln!("hasp: put {address}");
             }
-            let url = resolve(&address)?;
+            let url = resolve(&address, &profiles)?;
             let value = read_value(value)?;
             let secret = secrecy::SecretString::new(value.into());
             store.put(&url, &secret).map_err(fmt_error)?;
@@ -117,7 +125,7 @@ fn run(cli: Cli) -> Result<(), String> {
             if cli.verbose > 0 && !cli.quiet {
                 eprintln!("hasp: list {address}");
             }
-            let url = resolve(&address)?;
+            let url = resolve(&address, &profiles)?;
             let entries = store.list(&url).map_err(fmt_error)?;
             let output = format_list(&entries, format)?;
             if !output.is_empty() {
@@ -128,14 +136,14 @@ fn run(cli: Cli) -> Result<(), String> {
             if cli.verbose > 0 && !cli.quiet {
                 eprintln!("hasp: delete {address}");
             }
-            let url = resolve(&address)?;
+            let url = resolve(&address, &profiles)?;
             store.delete(&url).map_err(fmt_error)?;
         }
         Command::Exists { address } => {
             if cli.verbose > 0 && !cli.quiet {
                 eprintln!("hasp: exists {address}");
             }
-            let url = resolve(&address)?;
+            let url = resolve(&address, &profiles)?;
             let exists = store.exists(&url).map_err(fmt_error)?;
             std::process::exit(if exists { 0 } else { 1 });
         }
@@ -164,16 +172,61 @@ fn run(cli: Cli) -> Result<(), String> {
 ///
 /// If the address starts with `@`, look it up in the profile resolver.
 /// Otherwise return it unchanged, validating that it looks like a URL.
-fn resolve(address: &str) -> Result<String, String> {
+fn resolve(address: &str, profiles: &profiles::Profiles) -> Result<String, String> {
     if let Some(rest) = address.strip_prefix('@') {
-        let profiles =
-            profiles::load_profiles().map_err(|e| format!("failed to load profiles: {e}"))?;
         let url = profiles
             .resolve(rest)
             .ok_or_else(|| format!("unknown profile alias: @{rest}"))?;
         Ok(url)
     } else {
         Ok(address.to_owned())
+    }
+}
+
+/// Resolve proxy configuration from CLI flag and profile settings.
+///
+/// 1. `--proxy-url <URL>` CLI flag.
+/// 2. `proxy_url = "..."` in the active profile.
+/// 3. No explicit proxy — backends fall back to `HTTP_PROXY` / `HTTPS_PROXY`
+///    / `ALL_PROXY` environment variables.
+fn resolve_proxy(
+    cli: &Cli,
+    profiles: &profiles::Profiles,
+) -> Result<Option<hasp::ProxyConfig>, String> {
+    // Layer 1: CLI flag.
+    if let Some(raw) = &cli.proxy_url {
+        return hasp::ProxyConfig::parse(raw)
+            .map(Some)
+            .map_err(|e| format!("invalid --proxy-url: {e}"));
+    }
+
+    // Layer 2: profile `proxy_url`.
+    // We need the active profile name; look at the command's address.
+    for address in command_addresses(cli) {
+        if let Some(rest) = address.strip_prefix('@') {
+            let profile_name = rest.split_once('/').map(|(p, _)| p).unwrap_or(rest);
+            if let Some(raw) = profiles.proxy_url(profile_name) {
+                return hasp::ProxyConfig::parse(&raw)
+                    .map(Some)
+                    .map_err(|e| format!("invalid proxy_url in profile '{profile_name}': {e}"));
+            }
+        }
+    }
+
+    // Layer 3: fall back to env vars handled by reqwest / AWS SDK natively.
+    Ok(None)
+}
+
+/// Extract all address arguments from the current CLI command for proxy
+/// resolution.
+fn command_addresses(cli: &Cli) -> Vec<&str> {
+    match &cli.command {
+        Command::Get { address } => vec![address.as_str()],
+        Command::Put { address, .. } => vec![address.as_str()],
+        Command::List { address, .. } => vec![address.as_str()],
+        Command::Delete { address } => vec![address.as_str()],
+        Command::Exists { address } => vec![address.as_str()],
+        Command::Man | Command::Complete { .. } => vec![],
     }
 }
 

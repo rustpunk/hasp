@@ -26,7 +26,9 @@
 //! existence oracles. This backend follows that choice: both map to
 //! `NotFound` on `get` and to `false` on `exists`.
 
-use hasp_core::{Backend, BackendFailureKind, Entry, Error, ExposeSecret, SecretString};
+use hasp_core::{
+    Backend, BackendFailureKind, Entry, Error, ExposeSecret, ProxyConfig, SecretString,
+};
 use std::time::Duration;
 use url::Url;
 
@@ -78,14 +80,21 @@ impl TryFrom<&Url> for VaultUrl {
 ///
 /// Construction is a no-op; errors surface on first use. Every request
 /// builds a fresh `reqwest::blocking::Client` so the backend remains
-/// a zero-sized type.
+/// lightweight.
 #[derive(Debug)]
-pub struct VaultBackend;
+pub struct VaultBackend {
+    proxy: Option<ProxyConfig>,
+}
 
 impl VaultBackend {
     /// Create a new `VaultBackend`.
     pub fn new() -> Self {
-        Self
+        Self::with_proxy(None)
+    }
+
+    /// Create a new `VaultBackend` with an explicit HTTP CONNECT proxy.
+    pub fn with_proxy(proxy: Option<ProxyConfig>) -> Self {
+        Self { proxy }
     }
 }
 
@@ -106,7 +115,7 @@ impl Backend for VaultBackend {
         let (token, addr) = ambient_credentials()?;
         let request_url = build_request_url(&addr, &vault_url.mount, &vault_url.path);
 
-        let client = build_client()?;
+        let client = build_client(self.proxy.as_ref())?;
         let response = client
             .get(&request_url)
             .header("X-Vault-Token", token)
@@ -133,7 +142,7 @@ impl Backend for VaultBackend {
         let (token, addr) = ambient_credentials()?;
         let request_url = build_request_url(&addr, &vault_url.mount, &vault_url.path);
 
-        let client = build_client()?;
+        let client = build_client(self.proxy.as_ref())?;
 
         let data = if let Some(ref field) = vault_url.field {
             // Read-modify-write: optimistic, no CAS.
@@ -221,7 +230,7 @@ impl Backend for VaultBackend {
 
         let request_url = build_request_url(&addr, &vault_url.mount, &metadata_path);
 
-        let client = build_client()?;
+        let client = build_client(self.proxy.as_ref())?;
         let response = client
             .request(
                 reqwest::Method::from_bytes(b"LIST").expect("LIST is a valid HTTP method"),
@@ -287,7 +296,7 @@ impl Backend for VaultBackend {
         let (token, addr) = ambient_credentials()?;
         let request_url = build_request_url(&addr, &vault_url.mount, &vault_url.path);
 
-        let client = build_client()?;
+        let client = build_client(self.proxy.as_ref())?;
         let response = client
             .delete(&request_url)
             .header("X-Vault-Token", &token)
@@ -306,7 +315,7 @@ impl Backend for VaultBackend {
         let (token, addr) = ambient_credentials()?;
         let request_url = build_request_url(&addr, &vault_url.mount, &vault_url.path);
 
-        let client = build_client()?;
+        let client = build_client(self.proxy.as_ref())?;
         let response = client
             .get(&request_url)
             .header("X-Vault-Token", token)
@@ -321,18 +330,25 @@ impl Backend for VaultBackend {
     }
 }
 
-/// Build a `reqwest::blocking::Client` with a 10-second timeout.
-///
-/// The timeout prevents indefinite hangs when Vault is unreachable.
-fn build_client() -> Result<reqwest::blocking::Client, Error> {
-    reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(10))
-        .build()
-        .map_err(|e| Error::Backend {
+/// Build a `reqwest::blocking::Client` with an optional proxy and a
+/// 10-second timeout.
+fn build_client(proxy: Option<&ProxyConfig>) -> Result<reqwest::blocking::Client, Error> {
+    let mut builder = reqwest::blocking::Client::builder().timeout(Duration::from_secs(10));
+
+    if let Some(p) = proxy {
+        let reqwest_proxy = reqwest::Proxy::all(&p.url).map_err(|e| Error::Backend {
             scheme: "vault",
             kind: BackendFailureKind::Permanent,
-            message: format!("failed to build HTTP client: {e}"),
-        })
+            message: format!("invalid proxy URL: {e}"),
+        })?;
+        builder = builder.proxy(reqwest_proxy);
+    }
+
+    builder.build().map_err(|e| Error::Backend {
+        scheme: "vault",
+        kind: BackendFailureKind::Permanent,
+        message: format!("failed to build HTTP client: {e}"),
+    })
 }
 
 /// Return the ambient Vault address and token.

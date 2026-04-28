@@ -62,6 +62,11 @@ impl Profiles {
             .map(|m| m.keys().cloned().collect())
             .unwrap_or_default()
     }
+
+    /// Return the `proxy_url` for a named profile, if set.
+    pub fn proxy_url(&self, profile_name: &str) -> Option<String> {
+        self.inner.get(profile_name)?.get("proxy_url").cloned()
+    }
 }
 
 /// Load profiles from the config file path.
@@ -188,5 +193,36 @@ db_password = "env://DB_PASSWORD"
             prod.get("api_key").unwrap(),
             "op://Production/API/credential"
         );
+    }
+
+    #[test]
+    fn parse_proxy_url() {
+        let input = r#"
+[profiles.corp]
+proxy_url = "http://proxy.corp.example.com:8080"
+db_password = "env://DB_PASSWORD"
+"#;
+        let raw: RawProfiles = toml::from_str(input).unwrap();
+        let corp = raw.profiles.get("corp").unwrap();
+        assert_eq!(
+            corp.get("proxy_url").unwrap(),
+            "http://proxy.corp.example.com:8080"
+        );
+    }
+
+    #[test]
+    fn resolve_proxy_url() {
+        let mut inner = HashMap::new();
+        let mut profile = HashMap::new();
+        profile.insert("proxy_url".into(), "http://proxy:8080".into());
+        profile.insert("db_password".into(), "env://DB".into());
+        inner.insert("prod".into(), profile);
+
+        let profiles = Profiles { inner };
+        assert_eq!(
+            profiles.proxy_url("prod"),
+            Some("http://proxy:8080".to_string())
+        );
+        assert_eq!(profiles.proxy_url("missing"), None);
     }
 }

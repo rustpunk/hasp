@@ -13,7 +13,9 @@
 //! No auth-bootstrap flows or credential refresh logic lives in this
 //! crate.
 
-use hasp_core::{Backend, BackendFailureKind, Entry, Error, ExposeSecret, SecretString};
+use hasp_core::{
+    Backend, BackendFailureKind, Entry, Error, ExposeSecret, ProxyConfig, SecretString,
+};
 use serde::Deserialize;
 use url::Url;
 
@@ -78,12 +80,14 @@ impl TryFrom<&Url> for GcpSmUrl {
 /// use.
 pub struct GcpSmBackend {
     init: Result<tokio::runtime::Runtime, Error>,
+    proxy: Option<ProxyConfig>,
 }
 
 impl std::fmt::Debug for GcpSmBackend {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("GcpSmBackend")
             .field("init", &self.init.is_ok())
+            .field("proxy", &self.proxy.as_ref().map(|_| "[REDACTED]"))
             .finish()
     }
 }
@@ -97,7 +101,12 @@ impl GcpSmBackend {
     /// Errors on construction are deferred to first use so
     /// `Store::with_defaults()` never panics.
     pub fn new() -> Self {
+        Self::with_proxy(None)
+    }
+
+    pub fn with_proxy(proxy: Option<ProxyConfig>) -> Self {
         Self {
+            proxy,
             init: tokio::runtime::Builder::new_current_thread()
                 .enable_io()
                 .enable_time()
@@ -146,8 +155,16 @@ impl GcpSmBackend {
 
     /// Build a `reqwest::blocking::Client` ready for GCP.
     fn client(&self) -> reqwest::blocking::Client {
-        reqwest::blocking::Client::builder()
-            .timeout(std::time::Duration::from_secs(10))
+        let mut builder =
+            reqwest::blocking::Client::builder().timeout(std::time::Duration::from_secs(10));
+
+        if let Some(p) = &self.proxy {
+            let proxy = reqwest::Proxy::all(&p.url)
+                .expect("reqwest proxy construction is infallible with a valid URL");
+            builder = builder.proxy(proxy);
+        }
+
+        builder
             .build()
             .expect("reqwest client construction is infallible with default features")
     }

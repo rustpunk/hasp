@@ -12,7 +12,9 @@
 //! managed identity, Azure CLI) transparently. No auth-bootstrap flows or
 //! token refresh logic lives in this crate.
 
-use hasp_core::{Backend, BackendFailureKind, Entry, Error, ExposeSecret, SecretString};
+use hasp_core::{
+    Backend, BackendFailureKind, Entry, Error, ExposeSecret, ProxyConfig, SecretString,
+};
 use serde::Deserialize;
 use std::time::Duration;
 use url::Url;
@@ -76,12 +78,14 @@ impl TryFrom<&Url> for AzureKvUrl {
 /// runtime creation fails, the error is stored and replayed on first use.
 pub struct AzureKvBackend {
     init: Result<tokio::runtime::Runtime, Error>,
+    proxy: Option<ProxyConfig>,
 }
 
 impl std::fmt::Debug for AzureKvBackend {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AzureKvBackend")
             .field("init", &self.init.is_ok())
+            .field("proxy", &self.proxy.as_ref().map(|_| "[REDACTED]"))
             .finish()
     }
 }
@@ -96,7 +100,12 @@ impl AzureKvBackend {
     /// Errors on construction are deferred to first use so
     /// `Store::with_defaults()` never panics.
     pub fn new() -> Self {
+        Self::with_proxy(None)
+    }
+
+    pub fn with_proxy(proxy: Option<ProxyConfig>) -> Self {
         Self {
+            proxy,
             init: tokio::runtime::Builder::new_current_thread()
                 .enable_io()
                 .enable_time()
@@ -153,8 +162,15 @@ impl AzureKvBackend {
 
     /// Build a `reqwest::blocking::Client` ready for Azure.
     fn client(&self) -> reqwest::blocking::Client {
-        reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(10))
+        let mut builder = reqwest::blocking::Client::builder().timeout(Duration::from_secs(10));
+
+        if let Some(p) = &self.proxy {
+            let proxy = reqwest::Proxy::all(&p.url)
+                .expect("reqwest proxy construction is infallible with a valid URL");
+            builder = builder.proxy(proxy);
+        }
+
+        builder
             .build()
             .expect("reqwest client construction is infallible with default features")
     }

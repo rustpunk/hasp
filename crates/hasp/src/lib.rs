@@ -33,7 +33,7 @@
 
 pub use hasp_core::{
     scheme_from_url, Backend as BackendTrait, BackendFailureKind, CustomBackend, Entry, Error,
-    ExposeSecret, SecretString,
+    ExposeSecret, ProxyConfig, SecretString,
 };
 
 #[cfg(feature = "aws-sm")]
@@ -278,11 +278,114 @@ impl Backend {
     }
 }
 
-/// Batteries-included secret store.
+/// Fluent builder for a [`Store`] with optional proxy configuration.
 ///
-/// Construct with `Store::with_defaults()` to register all backends
-/// enabled by Cargo features, or build an empty store and add backends
-/// manually with `register`.
+/// Create a builder with `StoreBuilder::with_defaults()`, optionally
+/// call `.proxy(Some(config))`, then finish with `.build()`.
+pub struct StoreBuilder {
+    proxy: Option<ProxyConfig>,
+    defaults: bool,
+    extra_backends: Vec<Backend>,
+}
+
+impl StoreBuilder {
+    /// Create an empty builder.
+    pub fn empty() -> Self {
+        Self {
+            proxy: None,
+            defaults: false,
+            extra_backends: Vec::new(),
+        }
+    }
+
+    /// Create a builder pre-loaded with all default backends enabled by
+    /// Cargo features.
+    pub fn with_defaults() -> Self {
+        Self {
+            proxy: None,
+            defaults: true,
+            extra_backends: Vec::new(),
+        }
+    }
+
+    /// Set the HTTP CONNECT proxy for backends that support it.
+    pub fn proxy(mut self, proxy: Option<ProxyConfig>) -> Self {
+        self.proxy = proxy;
+        self
+    }
+
+    /// Append an extra backend to the store after the defaults.
+    pub fn register(mut self, backend: Backend) -> Self {
+        self.extra_backends.push(backend);
+        self
+    }
+
+    /// Build the final [`Store`].
+    pub fn build(self) -> Store {
+        let mut store = Store::empty();
+
+        if self.defaults {
+            #[cfg(feature = "aws-sm")]
+            {
+                store.register(Backend::AwsSm(AwsSmBackend::with_proxy(self.proxy.clone())));
+            }
+            #[cfg(feature = "aws-ssm")]
+            {
+                store.register(Backend::AwsSsm(AwsSsmBackend::with_proxy(
+                    self.proxy.clone(),
+                )));
+            }
+            #[cfg(feature = "env")]
+            {
+                store.register(Backend::Env(EnvBackend));
+            }
+            #[cfg(feature = "file")]
+            {
+                store.register(Backend::File(FileBackend));
+            }
+            #[cfg(feature = "keyring")]
+            {
+                store.register(Backend::Keyring(KeyringBackend::new()));
+            }
+            #[cfg(feature = "op")]
+            {
+                store.register(Backend::Op(OpBackend::new()));
+            }
+            #[cfg(feature = "vault")]
+            {
+                store.register(Backend::Vault(VaultBackend::with_proxy(self.proxy.clone())));
+            }
+            #[cfg(feature = "bw")]
+            {
+                store.register(Backend::Bw(BwBackend::new()));
+            }
+            #[cfg(feature = "gcp-sm")]
+            {
+                store.register(Backend::GcpSm(GcpSmBackend::with_proxy(self.proxy.clone())));
+            }
+            #[cfg(feature = "azure-kv")]
+            {
+                store.register(Backend::AzureKv(AzureKvBackend::with_proxy(
+                    self.proxy.clone(),
+                )));
+            }
+        }
+
+        for backend in self.extra_backends {
+            store.register(backend);
+        }
+
+        store
+    }
+}
+
+impl Default for StoreBuilder {
+    fn default() -> Self {
+        Self::empty()
+    }
+}
+
+/// Batteries-included secret store.
 pub struct Store {
     backends: HashMap<&'static str, Backend>,
 }
@@ -318,48 +421,7 @@ impl Store {
     /// - `op`
     /// - `vault`
     pub fn with_defaults() -> Self {
-        let mut backends = HashMap::new();
-        #[cfg(feature = "aws-sm")]
-        {
-            backends.insert("aws-sm", Backend::AwsSm(AwsSmBackend::new()));
-        }
-        #[cfg(feature = "aws-ssm")]
-        {
-            backends.insert("aws-ssm", Backend::AwsSsm(AwsSsmBackend::new()));
-        }
-        #[cfg(feature = "env")]
-        {
-            backends.insert("env", Backend::Env(EnvBackend));
-        }
-        #[cfg(feature = "file")]
-        {
-            backends.insert("file", Backend::File(FileBackend));
-        }
-        #[cfg(feature = "keyring")]
-        {
-            backends.insert("keyring", Backend::Keyring(KeyringBackend::new()));
-        }
-        #[cfg(feature = "op")]
-        {
-            backends.insert("op", Backend::Op(OpBackend::new()));
-        }
-        #[cfg(feature = "vault")]
-        {
-            backends.insert("vault", Backend::Vault(VaultBackend::new()));
-        }
-        #[cfg(feature = "bw")]
-        {
-            backends.insert("bw", Backend::Bw(BwBackend::new()));
-        }
-        #[cfg(feature = "gcp-sm")]
-        {
-            backends.insert("gcp-sm", Backend::GcpSm(GcpSmBackend::new()));
-        }
-        #[cfg(feature = "azure-kv")]
-        {
-            backends.insert("azure-kv", Backend::AzureKv(AzureKvBackend::new()));
-        }
-        Self { backends }
+        StoreBuilder::with_defaults().build()
     }
 
     /// Register an additional backend.

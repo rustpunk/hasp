@@ -81,6 +81,22 @@
   # Now try completion
   ```
 
+### `backend 'vault' failed: proxy error: ...`
+
+- Vault (and other HTTP backends) can route through an HTTP CONNECT proxy.
+- Quick fix: set standard environment variables:
+  ```bash
+  export HTTPS_PROXY=http://proxy.corp.example.com:8080
+  export NO_PROXY="localhost,127.0.0.1"
+  ```
+- Or use the explicit `--proxy-url` flag:
+  ```bash
+  hasp get --proxy-url http://proxy:8080 vault://secret/data/db
+  ```
+- For authenticated proxies, see [HTTP CONNECT Proxy](proxy.md).
+- AWS backends (`aws-sm://`, `aws-ssm://`) do not yet support explicit
+  proxy configuration. Use `HTTPS_PROXY` env vars for those.
+
 ## Next steps
 
 - [Installation](installation.md) — verify your build.

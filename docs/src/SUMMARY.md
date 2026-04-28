@@ -12,6 +12,7 @@
 - [How Hasp Thinks](concepts.md)
 - [Profile Aliases](profiles.md)
 - [Supported Backends](backends.md)
+- [HTTP CONNECT Proxy](proxy.md)
 
 # Using Hasp
 

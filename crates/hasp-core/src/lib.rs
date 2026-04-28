@@ -6,8 +6,10 @@
 //! those live in `hasp-cli`.
 
 pub mod error;
+pub mod proxy;
 
 pub use error::{BackendFailureKind, Error};
+pub use proxy::{is_no_proxy, resolve_proxy_from_env, ProxyConfig};
 pub use secrecy::{ExposeSecret, SecretString};
 
 use url::Url;

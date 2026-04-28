@@ -106,6 +106,15 @@ impl AwsSsmBackend {
     /// Errors on construction are deferred to first use so
     /// `Store::with_defaults()` never panics.
     pub fn new() -> Self {
+        Self::with_proxy(None)
+    }
+
+    /// Create a new `AwsSsmBackend` with an explicit proxy.
+    ///
+    /// **Note:** Explicit proxy configuration is not yet supported for
+    /// AWS SDK backends. Use the `HTTPS_PROXY`/`HTTP_PROXY` environment
+    /// variables instead.
+    pub fn with_proxy(_proxy: Option<hasp_core::ProxyConfig>) -> Self {
         Self {
             init: tokio::runtime::Builder::new_current_thread()
                 .enable_io()
