@@ -12,7 +12,7 @@ mod env_tests {
 
     #[test]
     fn env_get_roundtrip() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _guard = EnvGuard::set("HASP_TEST_VAR", "secret-value");
 
         let store = Store::with_defaults();
@@ -22,7 +22,7 @@ mod env_tests {
 
     #[test]
     fn env_not_found() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         env::remove_var("HASP_TEST_VAR_MISSING");
 
         let store = Store::with_defaults();
@@ -32,7 +32,7 @@ mod env_tests {
 
     #[test]
     fn env_exists() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _guard = EnvGuard::set("HASP_TEST_EXISTS", "1");
 
         let store = Store::with_defaults();
@@ -74,10 +74,10 @@ fn store_with_backends_registers_only_given() {
 }
 
 #[cfg(feature = "env")]
-#[test]
-fn free_function_get_uses_defaults() {
-    let _lock = ENV_LOCK.lock().unwrap();
-    let _guard = EnvGuard::set("HASP_FREE_FN_TEST", "free-fn-value");
+    #[test]
+    fn free_function_get_uses_defaults() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = EnvGuard::set("HASP_FREE_FN_TEST", "free-fn-value");
 
     let secret = hasp::get("env://HASP_FREE_FN_TEST").unwrap();
     assert_eq!(secret.expose_secret(), "free-fn-value");
@@ -86,7 +86,7 @@ fn free_function_get_uses_defaults() {
 #[cfg(feature = "env")]
 #[test]
 fn free_function_exists_uses_defaults() {
-    let _lock = ENV_LOCK.lock().unwrap();
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _guard = EnvGuard::set("HASP_FREE_FN_EXISTS", "1");
 
     assert!(hasp::exists("env://HASP_FREE_FN_EXISTS").unwrap());
@@ -106,7 +106,7 @@ mod cache_tests {
 
     #[test]
     fn get_memoized_serves_from_cache() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _guard = EnvGuard::set("HASP_CACHE_TEST", "cached-value");
 
         let store = Store::builder()
@@ -263,7 +263,7 @@ mod op_tests {
 
     #[test]
     fn op_get_roundtrip() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _fake = FakeOpGuard::canonical();
         let _env = EnvGuard::set("OP_SERVICE_ACCOUNT_TOKEN", "fake-token");
 
@@ -274,7 +274,7 @@ mod op_tests {
 
     #[test]
     fn op_exists() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _fake = FakeOpGuard::canonical();
         let _env = EnvGuard::set("OP_SERVICE_ACCOUNT_TOKEN", "fake-token");
 
@@ -285,7 +285,7 @@ mod op_tests {
 
     #[test]
     fn op_not_found() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _fake = FakeOpGuard::canonical();
         let _env = EnvGuard::set("OP_SERVICE_ACCOUNT_TOKEN", "fake-token");
 
@@ -298,7 +298,7 @@ mod op_tests {
 
     #[test]
     fn op_not_authenticated() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _fake = FakeOpGuard::canonical();
 
         let store = Store::builder().register(hasp::Backend::op()).build();
@@ -395,7 +395,7 @@ mod vault_tests {
             return;
         }
 
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let store = Store::with_defaults();
 
         // A real roundtrip requires a reachable Vault server with the
@@ -413,7 +413,7 @@ mod vault_tests {
             return;
         }
 
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let store = Store::with_defaults();
 
         let result = store.exists("vault://secret/data/hasp-test/test");
@@ -426,7 +426,7 @@ mod vault_tests {
             return;
         }
 
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let store = Store::with_defaults();
 
         let err = store
@@ -441,7 +441,7 @@ mod vault_tests {
 
     #[test]
     fn vault_not_authenticated() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
         let old_token = std::env::var("VAULT_TOKEN").ok();
         let old_addr = std::env::var("VAULT_ADDR").ok();
@@ -500,7 +500,7 @@ mod aws_sm_tests {
             return;
         }
 
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let store = Store::with_defaults();
 
         // A real roundtrip requires a reachable AWS account with the
@@ -522,7 +522,7 @@ mod aws_sm_tests {
             return;
         }
 
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let store = Store::with_defaults();
 
         let result = store.exists("aws-sm://us-east-1/hasp-test/secret");
@@ -541,7 +541,7 @@ mod aws_sm_tests {
             return;
         }
 
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let store = Store::with_defaults();
 
         let err = store
@@ -599,7 +599,7 @@ mod aws_ssm_tests {
             return;
         }
 
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let store = Store::with_defaults();
 
         let result = store.get("aws-ssm://us-east-1/hasp-test/secret");
@@ -618,7 +618,7 @@ mod aws_ssm_tests {
             return;
         }
 
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let store = Store::with_defaults();
 
         let result = store.exists("aws-ssm://us-east-1/hasp-test/secret");
@@ -637,7 +637,7 @@ mod aws_ssm_tests {
             return;
         }
 
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let store = Store::with_defaults();
 
         let err = store
@@ -673,7 +673,7 @@ mod bw_tests {
 
     #[test]
     fn bw_get_roundtrip() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _fake = FakeBwGuard::canonical();
         let _env = EnvGuard::set("BW_SESSION", "fake-session");
 
@@ -684,7 +684,7 @@ mod bw_tests {
 
     #[test]
     fn bw_exists() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _fake = FakeBwGuard::canonical();
         let _env = EnvGuard::set("BW_SESSION", "fake-session");
 
@@ -696,7 +696,7 @@ mod bw_tests {
 
     #[test]
     fn bw_not_found() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _fake = FakeBwGuard::canonical();
         let _env = EnvGuard::set("BW_SESSION", "fake-session");
 
@@ -707,7 +707,7 @@ mod bw_tests {
 
     #[test]
     fn bw_not_authenticated() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _fake = FakeBwGuard::canonical();
 
         let store = Store::builder().register(hasp::Backend::bw()).build();
@@ -778,7 +778,7 @@ mod gcp_sm_tests {
             return;
         }
 
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let store = Store::with_defaults();
 
         let result = store.get("gcp-sm://my-project/hasp-test-secret");
@@ -797,7 +797,7 @@ mod gcp_sm_tests {
             return;
         }
 
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let store = Store::with_defaults();
 
         let result = store.exists("gcp-sm://my-project/hasp-test-secret");
@@ -816,7 +816,7 @@ mod gcp_sm_tests {
             return;
         }
 
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let store = Store::with_defaults();
 
         let err = store
@@ -859,7 +859,7 @@ mod azure_kv_tests {
             return;
         }
 
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let store = Store::with_defaults();
 
         let result = store.get("azure-kv://my-vault/hasp-test-secret");
@@ -878,7 +878,7 @@ mod azure_kv_tests {
             return;
         }
 
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let store = Store::with_defaults();
 
         let result = store.exists("azure-kv://my-vault/hasp-test-secret");
@@ -897,7 +897,7 @@ mod azure_kv_tests {
             return;
         }
 
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let store = Store::with_defaults();
 
         let err = store
@@ -912,7 +912,7 @@ mod azure_kv_tests {
 
     #[test]
     fn azure_kv_not_authenticated() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
         let vars = [
             "AZURE_CLIENT_ID",

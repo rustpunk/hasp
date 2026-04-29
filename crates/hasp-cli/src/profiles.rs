@@ -241,4 +241,56 @@ db_password = "env://DB_PASSWORD"
         );
         assert_eq!(profiles.proxy_url("missing"), None);
     }
+
+    #[test]
+    fn load_profiles_rejects_invalid_url() {
+        use std::io::Write;
+
+        let mut tmpfile = tempfile::NamedTempFile::new().unwrap();
+        write!(
+            tmpfile,
+            r#"[profiles.prod]
+db_password = "not-a-valid-url"
+"#
+        )
+        .unwrap();
+
+        let _guard = hasp_core::test_utils::EnvGuard::set(
+            "HASP_PROFILES_PATH",
+            tmpfile.path().to_str().unwrap(),
+        );
+
+        let err = load_profiles().unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("invalid URL in profile 'prod.db_password'"),
+            "expected URL validation error for malformed TOML entry, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn load_profiles_rejects_invalid_proxy_url() {
+        use std::io::Write;
+
+        let mut tmpfile = tempfile::NamedTempFile::new().unwrap();
+        write!(
+            tmpfile,
+            r#"[profiles.corp]
+proxy_url = "socks5://proxy:1080"
+"#
+        )
+        .unwrap();
+
+        let _guard = hasp_core::test_utils::EnvGuard::set(
+            "HASP_PROFILES_PATH",
+            tmpfile.path().to_str().unwrap(),
+        );
+
+        let err = load_profiles().unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("invalid proxy_url"),
+            "expected proxy URL validation error, got: {msg}"
+        );
+    }
 }

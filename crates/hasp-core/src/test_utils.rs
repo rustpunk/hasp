@@ -80,15 +80,19 @@ if [ "$1" = "read" ] && [ "$2" = "--no-color" ]; then
     ref="$3"
     case "$ref" in
         op://test-vault/test-item/field1)
-            printf '%s' 'canned-secret-value-1'\n
+            printf '%s\n' 'canned-secret-value-1'
             exit 0
             ;;
         op://test-vault/test-item/field2)
-            printf '%s' 'canned-secret-value-2'\n
+            printf '%s\n' 'canned-secret-value-2'
             exit 0
             ;;
         op://test-vault/missing-item/*)
-            echo "[ERROR] item not found" >&2
+            echo "could not find item" >&2
+            exit 1
+            ;;
+        op://missing-vault/*)
+            echo "isn't a vault" >&2
             exit 1
             ;;
         *)
@@ -185,6 +189,11 @@ if [ -z "$BW_SESSION" ]; then
     exit 1
 fi
 
+# Strip leading flags that bw supports.
+while [ "$1" = "--response" ] || [ "$1" = "--nointeraction" ]; do
+    shift
+done
+
 if [ "$1" = "get" ] && [ "$2" = "item" ]; then
     name="$3"
     case "$name" in
@@ -195,7 +204,9 @@ JSON
             exit 0
             ;;
         missing-item)
-            echo "not found" >&2
+            cat <<'JSON'
+{"success":false,"message":"not found."}
+JSON
             exit 1
             ;;
         *)
