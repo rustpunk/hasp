@@ -385,12 +385,14 @@ impl Store {
 
     /// List entries matching the URL.
     ///
-    /// For backends that support prefix filtering (all backends), the
-    /// path component of the URL is used as a prefix: only entries whose
-    /// name or path starts with the given prefix are returned. Backends
-    /// that natively filter by prefix (SSM, Vault) are unchanged; backends
-    /// that return a flat project/region scope (AWS SM, GCP SM, Azure KV)
-    /// get client-side filtering applied automatically.
+    /// For backends that support prefix filtering, the path component of
+    /// the URL is used as a prefix: only entries whose name or path starts
+    /// with the given prefix are returned. Backends that natively filter
+    /// by prefix (SSM, Vault) are unchanged; backends that return a flat
+    /// project/region scope (AWS SM, GCP SM, Azure KV) get client-side
+    /// filtering applied automatically. Backends that do not support
+    /// listing at all (`env://`, `file://`, `keyring://`, `op://`, `bw://`)
+    /// return `UnsupportedOperation`.
     ///
     /// # Errors
     ///
@@ -441,17 +443,31 @@ impl Store {
 
     /// Check whether a secret exists by URL.
     ///
+    /// If the store was configured with a TTL and the URL has a fresh
+    /// cached entry, this returns `true` without hitting the backend.
+    ///
     /// # Errors
     ///
     /// Returns `Error::UnknownScheme` if no backend handles the URL's scheme.
     pub fn exists(&self, url: &str) -> Result<bool, Error> {
-        let url = Url::parse(url)?;
-        let scheme = url.scheme();
+        let parsed_url = Url::parse(url)?;
+        let scheme = parsed_url.scheme();
+
+        if let Some(ttl) = self.ttl {
+            if let Ok(cache) = self.cache.read() {
+                if let Some(entry) = cache.get(url) {
+                    if entry.fetched_at.elapsed() <= ttl {
+                        return Ok(true);
+                    }
+                }
+            }
+        }
+
         let backend = self
             .backends
             .get(scheme)
             .ok_or_else(|| Error::UnknownScheme(scheme.to_owned()))?;
-        backend.exists(&url)
+        backend.exists(&parsed_url)
     }
 }
 

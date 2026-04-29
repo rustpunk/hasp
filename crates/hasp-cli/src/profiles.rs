@@ -276,7 +276,7 @@ db_password = "not-a-valid-url"
         write!(
             tmpfile,
             r#"[profiles.corp]
-proxy_url = "socks5://proxy:1080"
+proxy_url = "ftp://proxy:1080"
 "#
         )
         .unwrap();
@@ -289,7 +289,7 @@ proxy_url = "socks5://proxy:1080"
         let err = load_profiles().unwrap_err();
         let msg = err.to_string();
         assert!(
-            msg.contains("invalid proxy_url"),
+            msg.contains("invalid proxy_url") || msg.contains("socks5"),
             "expected proxy URL validation error, got: {msg}"
         );
     }

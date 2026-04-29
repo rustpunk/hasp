@@ -74,10 +74,10 @@ fn store_with_backends_registers_only_given() {
 }
 
 #[cfg(feature = "env")]
-    #[test]
-    fn free_function_get_uses_defaults() {
-        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let _guard = EnvGuard::set("HASP_FREE_FN_TEST", "free-fn-value");
+#[test]
+fn free_function_get_uses_defaults() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = EnvGuard::set("HASP_FREE_FN_TEST", "free-fn-value");
 
     let secret = hasp::get("env://HASP_FREE_FN_TEST").unwrap();
     assert_eq!(secret.expose_secret(), "free-fn-value");

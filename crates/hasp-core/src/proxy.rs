@@ -4,8 +4,9 @@
 //! proxy (Squid, Blue Coat, Zscaler, etc.). This module provides the
 //! configuration type and resolution helpers used by HTTP-based backends.
 //!
-//! SOCKS5 is out of scope for the current release. If your network requires
-//! it, use a local SOCKS5-to-HTTP-CONNECT adapter (e.g. `proxychains-ng`).
+//! SOCKS5 is supported for HTTP-based backends that use `reqwest`.
+//! Enable the `socks5-proxy` feature on the backend crate to include
+//! `reqwest`'s `socks` feature.
 
 use crate::Error;
 use secrecy::SecretString;
@@ -58,9 +59,9 @@ impl ProxyConfig {
         let parsed =
             ::url::Url::parse(url).map_err(|e| Error::InvalidUrl(format!("proxy URL: {e}")))?;
 
-        if parsed.scheme() != "http" && parsed.scheme() != "https" {
+        if parsed.scheme() != "http" && parsed.scheme() != "https" && parsed.scheme() != "socks5" {
             return Err(Error::InvalidUrl(format!(
-                "proxy URL must be http:// or https://, got {}",
+                "proxy URL must be http://, https://, or socks5://, got {}",
                 parsed.scheme()
             )));
         }
@@ -226,10 +227,18 @@ mod tests {
     }
 
     #[test]
-    fn parse_non_http_scheme_rejected() {
-        let err = ProxyConfig::parse("socks5://proxy:1080").unwrap_err();
+    fn parse_socks5_scheme_accepted() {
+        let cfg = ProxyConfig::parse("socks5://proxy:1080").unwrap();
+        assert_eq!(cfg.scheme, "socks5");
+        assert_eq!(cfg.host, "proxy");
+        assert_eq!(cfg.port, 1080);
+    }
+
+    #[test]
+    fn parse_ftp_scheme_rejected() {
+        let err = ProxyConfig::parse("ftp://proxy:1080").unwrap_err();
         assert!(
-            matches!(err, Error::InvalidUrl(ref s) if s.contains("http:// or https://")),
+            matches!(err, Error::InvalidUrl(ref s) if s.contains("http://, https://, or socks5://")),
             "expected InvalidUrl for non-http scheme, got: {err}"
         );
     }
