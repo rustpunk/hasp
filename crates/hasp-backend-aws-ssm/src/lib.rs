@@ -148,7 +148,7 @@ impl AwsSsmBackend {
         })?;
 
         let old_https = std::env::var("HTTPS_PROXY").ok();
-        let old_http  = std::env::var("HTTP_PROXY").ok();
+        let old_http = std::env::var("HTTP_PROXY").ok();
 
         if let Some(url) = &self.proxy {
             std::env::set_var("HTTPS_PROXY", url);

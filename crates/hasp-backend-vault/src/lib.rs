@@ -340,11 +340,12 @@ fn build_client(proxy: Option<&ProxyConfig>) -> Result<reqwest::blocking::Client
     let mut builder = reqwest::blocking::Client::builder().timeout(Duration::from_secs(10));
 
     if let Some(p) = proxy {
-        let reqwest_proxy = reqwest::Proxy::all(p.url_without_credentials()).map_err(|e| Error::Backend {
-            scheme: "vault",
-            kind: BackendFailureKind::Permanent,
-            message: format!("invalid proxy URL: {e}"),
-        })?;
+        let reqwest_proxy =
+            reqwest::Proxy::all(p.url_without_credentials()).map_err(|e| Error::Backend {
+                scheme: "vault",
+                kind: BackendFailureKind::Permanent,
+                message: format!("invalid proxy URL: {e}"),
+            })?;
         builder = builder.proxy(reqwest_proxy);
     }
 
@@ -462,8 +463,8 @@ fn extract_secret(body: &serde_json::Value, field: Option<&str>) -> Result<Secre
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hasp_core::ExposeSecret;
     use hasp_core::test_utils::{EnvGuard, ENV_LOCK};
+    use hasp_core::ExposeSecret;
 
     #[test]
     fn parse_valid_url_with_field() {

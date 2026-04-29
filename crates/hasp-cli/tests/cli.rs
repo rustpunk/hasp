@@ -4,8 +4,8 @@
 //! They do not depend on external services; secret values come from
 //! `env://` and `file://` backends only.
 
-use std::process::{Command, Stdio};
 use hasp_core::test_utils::{EnvGuard, ENV_LOCK};
+use std::process::{Command, Stdio};
 
 fn hasp() -> Command {
     let mut path = std::env::current_exe().unwrap();
@@ -633,5 +633,3 @@ fn cli_quiet_flag_overrides_verbose() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert_eq!(stdout.trim_end(), "quiet-works");
 }
-
-

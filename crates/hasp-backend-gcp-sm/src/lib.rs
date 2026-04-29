@@ -311,9 +311,11 @@ impl Backend for GcpSmBackend {
 
         let prefix = gcp_url.secret_id.trim_matches('/');
 
-        let mut request_url = Url::parse(
-            &format!("{}/projects/{}/secrets", Self::BASE_URL, gcp_url.project_id),
-        )
+        let mut request_url = Url::parse(&format!(
+            "{}/projects/{}/secrets",
+            Self::BASE_URL,
+            gcp_url.project_id
+        ))
         .map_err(|e| Error::Backend {
             scheme: Self::SCHEME,
             kind: BackendFailureKind::Permanent,
@@ -321,9 +323,10 @@ impl Backend for GcpSmBackend {
         })?;
 
         if !prefix.is_empty() {
-            request_url
-                .query_pairs_mut()
-                .append_pair("filter", &format!("name:projects/{}/secrets/{}", gcp_url.project_id, prefix));
+            request_url.query_pairs_mut().append_pair(
+                "filter",
+                &format!("name:projects/{}/secrets/{}", gcp_url.project_id, prefix),
+            );
         }
 
         let client = self.client();
@@ -367,23 +370,22 @@ impl Backend for GcpSmBackend {
 
             match payload.next_page_token {
                 Some(ref t) if !t.is_empty() => {
-                    request_url = Url::parse(
-                        &format!(
-                            "{}/projects/{}/secrets?pageToken={}",
-                            Self::BASE_URL,
-                            gcp_url.project_id,
-                            t,
-                        ),
-                    )
+                    request_url = Url::parse(&format!(
+                        "{}/projects/{}/secrets?pageToken={}",
+                        Self::BASE_URL,
+                        gcp_url.project_id,
+                        t,
+                    ))
                     .map_err(|e| Error::Backend {
                         scheme: Self::SCHEME,
                         kind: BackendFailureKind::Permanent,
                         message: format!("failed to build paginated list URL: {e}"),
                     })?;
                     if !prefix.is_empty() {
-                        request_url
-                            .query_pairs_mut()
-                            .append_pair("filter", &format!("name:projects/{}/secrets/{}", gcp_url.project_id, prefix));
+                        request_url.query_pairs_mut().append_pair(
+                            "filter",
+                            &format!("name:projects/{}/secrets/{}", gcp_url.project_id, prefix),
+                        );
                     }
                 }
                 _ => break,

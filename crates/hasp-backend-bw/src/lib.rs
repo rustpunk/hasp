@@ -479,7 +479,7 @@ fn extract_field(data: &serde_json::Value, path: &str, reference: &str) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
-use hasp_core::test_utils::{EnvGuard, ENV_LOCK};
+    use hasp_core::test_utils::{EnvGuard, ENV_LOCK};
 
     #[test]
     fn parse_valid_url() {
