@@ -26,6 +26,7 @@ azure-kv = ["hasp/azure-kv"]
 
 [dependencies]
 hasp = { path = "../hasp" }
+hasp-core = { path = "../hasp-core" }
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
@@ -35,6 +36,7 @@ secrecy = "0.10"
 clap_complete = { version = "4", features = ["unstable-dynamic"] }
 clap_mangen = "0.2"
 serde_json = "1"
+url = "2.5"
 
 [dev-dependencies]
 tempfile = "3"

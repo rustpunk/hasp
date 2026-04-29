@@ -701,9 +701,7 @@ mod bw_tests {
         let _env = EnvGuard::set("BW_SESSION", "fake-session");
 
         let store = Store::builder().register(hasp::Backend::bw()).build();
-        let err = store
-            .get("bw://missing-item/login.password")
-            .unwrap_err();
+        let err = store.get("bw://missing-item/login.password").unwrap_err();
         assert!(matches!(err, hasp::Error::NotFound(_)));
     }
 

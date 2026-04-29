@@ -49,7 +49,17 @@ impl FakeOpGuard {
     /// - On `item list --vault ...` returns exit 0 (exists) or exit 1 (not found).
     /// - On `--version` prints `2.30.3`.
     pub fn canonical() -> Self {
-        let tmpdir = tempfile::tempdir().expect("fake op tempdir");
+        let target_dir = std::env::current_exe()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let tmpdir = tempfile::Builder::new()
+            .prefix("hasp-test-")
+            .tempdir_in(&target_dir)
+            .expect("fake op tempdir");
         let bin_dir = tmpdir.path();
 
         let script = r#"#!/bin/sh
@@ -148,7 +158,17 @@ impl FakeBwGuard {
     pub fn canonical() -> Self {
         use std::env;
 
-        let tmpdir = tempfile::tempdir().expect("fake bw tempdir");
+        let target_dir = std::env::current_exe()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let tmpdir = tempfile::Builder::new()
+            .prefix("hasp-test-")
+            .tempdir_in(&target_dir)
+            .expect("fake bw tempdir");
         let bin_dir = tmpdir.path();
 
         let script = r#"#!/bin/sh

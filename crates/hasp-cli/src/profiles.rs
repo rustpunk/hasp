@@ -78,10 +78,14 @@ impl Profiles {
 /// Fails only if the file exists but is unreadable or unparseable.
 /// If the file does not exist, returns an empty `Profiles`.
 ///
+/// URLs are validated at load time so malformed config surfaces
+/// immediately, not at first use.
+///
 /// # Errors
 ///
 /// Returns `std::io::Error` for permission or disk errors.
 /// Returns `toml::de::Error` for malformed TOML.
+/// Returns `hasp_core::Error::InvalidUrl` for syntactically invalid URLs.
 pub fn load_profiles() -> Result<Profiles, Box<dyn std::error::Error>> {
     let path = match std::env::var_os("HASP_PROFILES_PATH") {
         Some(p) => std::path::PathBuf::from(p),
@@ -102,7 +106,19 @@ pub fn load_profiles() -> Result<Profiles, Box<dyn std::error::Error>> {
 
     let mut inner: HashMap<String, HashMap<String, String>> = HashMap::new();
     for (profile_name, map) in raw.profiles {
-        inner.insert(profile_name, map);
+        let mut validated = HashMap::new();
+        for (key, url_str) in map {
+            if key == "proxy_url" {
+                hasp_core::ProxyConfig::parse(&url_str).map_err(|e| {
+                    format!("invalid proxy_url in profile '{profile_name}.{key}': {e}")
+                })?;
+            } else {
+                url::Url::parse(&url_str)
+                    .map_err(|e| format!("invalid URL in profile '{profile_name}.{key}': {e}"))?;
+            }
+            validated.insert(key, url_str);
+        }
+        inner.insert(profile_name, validated);
     }
 
     Ok(Profiles { inner })
