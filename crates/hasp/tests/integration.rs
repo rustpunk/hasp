@@ -99,6 +99,63 @@ fn unknown_scheme() {
     assert!(matches!(err, hasp::Error::UnknownScheme(_)));
 }
 
+#[cfg(feature = "env")]
+mod cache_tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn get_memoized_serves_from_cache() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _guard = EnvGuard::set("HASP_CACHE_TEST", "cached-value");
+
+        let store = Store::builder()
+            .cache_ttl(Some(Duration::from_secs(60)))
+            .register(hasp::Backend::env())
+            .build();
+
+        let first = store.get("env://HASP_CACHE_TEST").unwrap();
+        assert_eq!(first.expose_secret(), "cached-value");
+
+        // Remove the env var; a cache-miss would fail.
+        std::env::remove_var("HASP_CACHE_TEST");
+
+        let second = store.get("env://HASP_CACHE_TEST").unwrap();
+        assert_eq!(second.expose_secret(), "cached-value");
+    }
+
+    #[test]
+    fn put_invalidates_cache() {
+        use tempfile::NamedTempFile;
+        use std::io::Write;
+
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(b"old-value").unwrap();
+        let path = file.path().to_string_lossy().to_string();
+
+        let store = Store::builder()
+            .cache_ttl(Some(Duration::from_secs(60)))
+            .register(hasp::Backend::file())
+            .build();
+
+        let url = format!("file://{path}");
+
+        let first = store.get(&url).unwrap();
+        assert_eq!(first.expose_secret(), "old-value");
+
+        // Overwrite the file under the same path.
+        std::fs::write(&path, b"new-value").unwrap();
+
+        // Write a new value through the store.
+        let secret = hasp::SecretString::new("new-value".into());
+        store.put(&url, &secret).unwrap();
+
+        // Put succeeded, so cache is invalidated. Next get reads fresh.
+        let second = store.get(&url).unwrap();
+        assert_eq!(second.expose_secret(), "new-value");
+    }
+}
+
 #[cfg(not(feature = "file"))]
 mod file_disabled_tests {
     use super::*;

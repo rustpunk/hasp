@@ -32,8 +32,8 @@
 //! output never leaks secret values.
 
 pub use hasp_core::{
-    scheme_from_url, Backend as BackendTrait, BackendFailureKind, Entry, Error,
-    ExposeSecret, ProxyConfig, SecretString,
+    scheme_from_url, Backend as BackendTrait, BackendFailureKind, Entry, Error, ExposeSecret,
+    ProxyConfig, SecretString,
 };
 
 #[cfg(feature = "aws-sm")]
@@ -68,6 +68,8 @@ pub use hasp_backend_azure_kv::AzureKvBackend;
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::RwLock;
+use std::time::{Duration, Instant};
 use url::Url;
 
 /// Opaque handle to a backend instance.
@@ -171,11 +173,13 @@ impl hasp_core::Backend for Backend {
 /// Fluent builder for a [`Store`] with optional proxy configuration.
 ///
 /// Create a builder with `StoreBuilder::with_defaults()`, optionally
-/// call `.proxy(Some(config))`, then finish with `.build()`.
+/// call `.proxy(Some(config))` and `.cache_ttl(Some(Duration::from_secs(60)))`,
+/// then finish with `.build()`.
 pub struct StoreBuilder {
     proxy: Option<ProxyConfig>,
     defaults: bool,
     extra_backends: Vec<Backend>,
+    ttl: Option<Duration>,
 }
 
 impl StoreBuilder {
@@ -185,6 +189,7 @@ impl StoreBuilder {
             proxy: None,
             defaults: false,
             extra_backends: Vec::new(),
+            ttl: None,
         }
     }
 
@@ -195,12 +200,19 @@ impl StoreBuilder {
             proxy: None,
             defaults: true,
             extra_backends: Vec::new(),
+            ttl: None,
         }
     }
 
     /// Set the HTTP CONNECT proxy for backends that support it.
     pub fn proxy(mut self, proxy: Option<ProxyConfig>) -> Self {
         self.proxy = proxy;
+        self
+    }
+
+    /// Set a TTL for the `Store` memoization cache. `None` disables caching.
+    pub fn cache_ttl(mut self, ttl: Option<Duration>) -> Self {
+        self.ttl = ttl;
         self
     }
 
@@ -213,6 +225,7 @@ impl StoreBuilder {
     /// Build the final [`Store`].
     pub fn build(self) -> Store {
         let mut store = Store::empty();
+        store.ttl = self.ttl;
 
         if self.defaults {
             #[cfg(feature = "aws-sm")]
@@ -251,9 +264,16 @@ impl Default for StoreBuilder {
     }
 }
 
+struct CacheEntry {
+    secret: SecretString,
+    fetched_at: Instant,
+}
+
 /// Batteries-included secret store.
 pub struct Store {
     backends: HashMap<&'static str, Backend>,
+    cache: RwLock<HashMap<String, CacheEntry>>,
+    ttl: Option<Duration>,
 }
 
 impl Store {
@@ -261,6 +281,8 @@ impl Store {
     pub fn empty() -> Self {
         Self {
             backends: HashMap::new(),
+            cache: RwLock::new(HashMap::new()),
+            ttl: None,
         }
     }
 
@@ -276,18 +298,15 @@ impl Store {
         store
     }
 
-    /// Create a store with all default backends registered.
-    ///
-    /// Which backends are available depends on Cargo features:
-    /// - `aws-sm`
-    /// - `bw`
-    /// - `env` (enabled by default)
-    /// - `file`
-    /// - `keyring`
-    /// - `op`
-    /// - `vault`
+    /// Create a builder pre-loaded with all default backends enabled by
+    /// Cargo features.
     pub fn with_defaults() -> Self {
         StoreBuilder::with_defaults().build()
+    }
+
+    /// Return a [`StoreBuilder`] for fluent configuration.
+    pub fn builder() -> StoreBuilder {
+        StoreBuilder::empty()
     }
 
     /// Register an additional backend.
@@ -299,17 +318,46 @@ impl Store {
 
     /// Fetch a secret by URL.
     ///
+    /// If the store was configured with a TTL, the result is memoized and
+    /// subsequent calls for the same URL return a clone of the cached
+    /// secret without hitting the backend again.
+    ///
     /// # Errors
     ///
     /// Returns `Error::UnknownScheme` if no backend handles the URL's scheme.
     pub fn get(&self, url: &str) -> Result<SecretString, Error> {
-        let url = Url::parse(url)?;
-        let scheme = url.scheme();
+        let parsed_url = Url::parse(url)?;
+        let scheme = parsed_url.scheme();
         let backend = self
             .backends
             .get(scheme)
             .ok_or_else(|| Error::UnknownScheme(scheme.to_owned()))?;
-        backend.get(&url)
+
+        if let Some(ttl) = self.ttl {
+            if let Ok(cache) = self.cache.read() {
+                if let Some(entry) = cache.get(url) {
+                    if entry.fetched_at.elapsed() <= ttl {
+                        return Ok(entry.secret.clone());
+                    }
+                }
+            }
+        }
+
+        let secret = backend.get(&parsed_url)?;
+
+        if self.ttl.is_some() {
+            if let Ok(mut cache) = self.cache.write() {
+                cache.insert(
+                    url.to_owned(),
+                    CacheEntry {
+                        secret: secret.clone(),
+                        fetched_at: Instant::now(),
+                    },
+                );
+            }
+        }
+
+        Ok(secret)
     }
 
     /// Store a secret by URL.
@@ -318,13 +366,21 @@ impl Store {
     ///
     /// Returns `Error::UnknownScheme` if no backend handles the URL's scheme.
     pub fn put(&self, url: &str, value: &SecretString) -> Result<(), Error> {
-        let url = Url::parse(url)?;
-        let scheme = url.scheme();
+        let parsed_url = Url::parse(url)?;
+        let scheme = parsed_url.scheme();
         let backend = self
             .backends
             .get(scheme)
             .ok_or_else(|| Error::UnknownScheme(scheme.to_owned()))?;
-        backend.put(&url, value)
+        backend.put(&parsed_url, value)?;
+
+        if self.ttl.is_some() {
+            if let Ok(mut cache) = self.cache.write() {
+                cache.remove(url);
+            }
+        }
+
+        Ok(())
     }
 
     /// List entries matching the URL.
@@ -366,13 +422,21 @@ impl Store {
     ///
     /// Returns `Error::UnknownScheme` if no backend handles the URL's scheme.
     pub fn delete(&self, url: &str) -> Result<(), Error> {
-        let url = Url::parse(url)?;
-        let scheme = url.scheme();
+        let parsed_url = Url::parse(url)?;
+        let scheme = parsed_url.scheme();
         let backend = self
             .backends
             .get(scheme)
             .ok_or_else(|| Error::UnknownScheme(scheme.to_owned()))?;
-        backend.delete(&url)
+        backend.delete(&parsed_url)?;
+
+        if self.ttl.is_some() {
+            if let Ok(mut cache) = self.cache.write() {
+                cache.remove(url);
+            }
+        }
+
+        Ok(())
     }
 
     /// Check whether a secret exists by URL.
