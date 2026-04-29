@@ -95,11 +95,12 @@ impl TryFrom<&Url> for AwsSsmUrl {
 /// `current_thread` to keep the backend lightweight for short-lived CLI
 /// invocations. If runtime creation fails, the error is stored and
 /// replayed on the first operation.
+///
+/// **Note:** Explicit proxy configuration is not yet supported for AWS SDK
+/// backends. Use the `HTTPS_PROXY`/`HTTP_PROXY` environment variables instead.
 #[derive(Debug)]
 pub struct AwsSsmBackend {
     init: Result<tokio::runtime::Runtime, Error>,
-    proxy: Option<String>,
-    proxy_lock: std::sync::Mutex<()>,
 }
 
 impl AwsSsmBackend {
@@ -108,16 +109,6 @@ impl AwsSsmBackend {
     /// Errors on construction are deferred to first use so
     /// `Store::with_defaults()` never panics.
     pub fn new() -> Self {
-        Self::with_proxy(None)
-    }
-
-    /// Create a new `AwsSsmBackend` with an explicit proxy.
-    ///
-    /// **Note:** Explicit proxy configuration is not yet supported for
-    /// AWS SDK backends. Use the `HTTPS_PROXY`/`HTTP_PROXY` environment
-    /// variables instead.
-    pub fn with_proxy(proxy: Option<hasp_core::ProxyConfig>) -> Self {
-        let proxy_url = proxy.as_ref().map(|p| p.url_without_credentials());
         Self {
             init: tokio::runtime::Builder::new_current_thread()
                 .enable_io()
@@ -128,9 +119,16 @@ impl AwsSsmBackend {
                     kind: BackendFailureKind::Permanent,
                     message: format!("failed to create tokio runtime: {e}"),
                 }),
-            proxy: proxy_url,
-            proxy_lock: std::sync::Mutex::new(()),
         }
+    }
+
+    /// Create a new `AwsSsmBackend` with an explicit proxy.
+    ///
+    /// **Note:** Explicit proxy configuration is not yet supported for
+    /// AWS SDK backends. Use the `HTTPS_PROXY`/`HTTP_PROXY` environment
+    /// variables instead.
+    pub fn with_proxy(_proxy: Option<hasp_core::ProxyConfig>) -> Self {
+        Self::new()
     }
 
     fn runtime(&self) -> Result<&tokio::runtime::Runtime, Error> {
@@ -141,33 +139,8 @@ impl AwsSsmBackend {
     where
         F: std::future::Future,
     {
-        let _guard = self.proxy_lock.lock().map_err(|e| Error::Backend {
-            scheme: "aws-ssm",
-            kind: BackendFailureKind::Permanent,
-            message: format!("proxy lock poisoned: {e}"),
-        })?;
-
-        let old_https = std::env::var("HTTPS_PROXY").ok();
-        let old_http = std::env::var("HTTP_PROXY").ok();
-
-        if let Some(url) = &self.proxy {
-            std::env::set_var("HTTPS_PROXY", url);
-            std::env::set_var("HTTP_PROXY", url);
-        }
-
         let rt = self.runtime()?;
-        let result = Ok(rt.block_on(future));
-
-        match old_https {
-            Some(v) => std::env::set_var("HTTPS_PROXY", v),
-            None => std::env::remove_var("HTTPS_PROXY"),
-        }
-        match old_http {
-            Some(v) => std::env::set_var("HTTP_PROXY", v),
-            None => std::env::remove_var("HTTP_PROXY"),
-        }
-
-        result
+        Ok(rt.block_on(future))
     }
 }
 

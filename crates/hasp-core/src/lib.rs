@@ -66,20 +66,6 @@ pub trait Backend: Send + Sync {
     fn exists(&self, url: &Url) -> Result<bool, Error>;
 }
 
-/// Escape-hatch trait for foreign backends that cannot be compiled into
-/// the root `Backend` enum.
-///
-/// Has the same shape as `Backend` but is object-safe and intended for
-/// dynamic registration at runtime.
-pub trait CustomBackend: Send + Sync {
-    fn scheme(&self) -> &'static str;
-    fn get(&self, url: &Url) -> Result<SecretString, Error>;
-    fn put(&self, url: &Url, value: &SecretString) -> Result<(), Error>;
-    fn list(&self, url: &Url) -> Result<Vec<Entry>, Error>;
-    fn delete(&self, url: &Url) -> Result<(), Error>;
-    fn exists(&self, url: &Url) -> Result<bool, Error>;
-}
-
 /// A named entry returned by `Backend::list`.
 ///
 /// `name` is the human-readable identifier; `url` is the canonical

@@ -64,7 +64,7 @@ fn store_empty_has_no_backends() {
 #[cfg(feature = "env")]
 #[test]
 fn store_with_backends_registers_only_given() {
-    let store = Store::with_backends(vec![hasp::Backend::Env(hasp::EnvBackend)]);
+    let store = Store::with_backends(vec![hasp::Backend::env()]);
 
     let result = store.get("env://HOME");
     assert!(result.is_ok() || result.is_err());

@@ -32,7 +32,7 @@
 //! output never leaks secret values.
 
 pub use hasp_core::{
-    scheme_from_url, Backend as BackendTrait, BackendFailureKind, CustomBackend, Entry, Error,
+    scheme_from_url, Backend as BackendTrait, BackendFailureKind, Entry, Error,
     ExposeSecret, ProxyConfig, SecretString,
 };
 
@@ -70,130 +70,101 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use url::Url;
 
-/// Dispatches to a concrete backend based on URL scheme.
+/// Opaque handle to a backend instance.
 ///
-/// Built-in variants are enabled by Cargo features. The `Custom` variant
-/// allows runtime registration of foreign backends.
-pub enum Backend {
-    /// AWS Secrets Manager backend (`aws-sm://`).
-    #[cfg(feature = "aws-sm")]
-    AwsSm(AwsSmBackend),
-
-    /// AWS SSM Parameter Store backend (`aws-ssm://`).
-    #[cfg(feature = "aws-ssm")]
-    AwsSsm(AwsSsmBackend),
-
-    /// Environment-variable backend (`env://`).
-    #[cfg(feature = "env")]
-    Env(EnvBackend),
-
-    /// File backend (`file://`).
-    #[cfg(feature = "file")]
-    File(FileBackend),
-
-    /// OS keyring backend (`keyring://`).
-    #[cfg(feature = "keyring")]
-    Keyring(KeyringBackend),
-
-    /// 1Password CLI backend (`op://`).
-    #[cfg(feature = "op")]
-    Op(OpBackend),
-
-    /// HashiCorp Vault HTTP backend (`vault://`).
-    #[cfg(feature = "vault")]
-    Vault(VaultBackend),
-
-    /// Bitwarden CLI backend (`bw://`).
-    #[cfg(feature = "bw")]
-    Bw(BwBackend),
-
-    /// Google Cloud Secret Manager REST backend (`gcp-sm://`).
-    #[cfg(feature = "gcp-sm")]
-    GcpSm(GcpSmBackend),
-
-    /// Azure Key Vault REST backend (`azure-kv://`).
-    #[cfg(feature = "azure-kv")]
-    AzureKv(AzureKvBackend),
-
-    /// Dynamically-registered backend.
-    Custom(Arc<dyn CustomBackend>),
-}
-
-/// Declaratively dispatches a method call to every built-in backend variant.
-macro_rules! dispatch_backend {
-    ($self:expr, $method:ident $(, $arg:expr)* $(,)?) => {
-        match $self {
-            #[cfg(feature = "aws-sm")]
-            Backend::AwsSm(b) => b.$method($($arg),*),
-            #[cfg(feature = "aws-ssm")]
-            Backend::AwsSsm(b) => b.$method($($arg),*),
-            #[cfg(feature = "env")]
-            Backend::Env(b) => b.$method($($arg),*),
-            #[cfg(feature = "file")]
-            Backend::File(b) => b.$method($($arg),*),
-            #[cfg(feature = "keyring")]
-            Backend::Keyring(b) => b.$method($($arg),*),
-            #[cfg(feature = "op")]
-            Backend::Op(b) => b.$method($($arg),*),
-            #[cfg(feature = "vault")]
-            Backend::Vault(b) => b.$method($($arg),*),
-            #[cfg(feature = "bw")]
-            Backend::Bw(b) => b.$method($($arg),*),
-            #[cfg(feature = "gcp-sm")]
-            Backend::GcpSm(b) => b.$method($($arg),*),
-            #[cfg(feature = "azure-kv")]
-            Backend::AzureKv(b) => b.$method($($arg),*),
-            Backend::Custom(b) => b.$method($($arg),*),
-        }
-    };
-}
+/// All backends implement `hasp_core::Backend`. This wrapper provides
+/// cheap cloning (`Arc`) and dynamic dispatch so `Store` can hold
+/// heterogeneous backends in a single map.
+pub struct Backend(Arc<dyn hasp_core::Backend>);
 
 impl Backend {
-    /// Returns the URL scheme handled by this backend instance.
-    pub fn scheme(&self) -> &'static str {
-        match self {
-            #[cfg(feature = "aws-sm")]
-            Backend::AwsSm(_) => "aws-sm",
-            #[cfg(feature = "aws-ssm")]
-            Backend::AwsSsm(_) => "aws-ssm",
-            #[cfg(feature = "env")]
-            Backend::Env(_) => "env",
-            #[cfg(feature = "file")]
-            Backend::File(_) => "file",
-            #[cfg(feature = "keyring")]
-            Backend::Keyring(_) => "keyring",
-            #[cfg(feature = "op")]
-            Backend::Op(_) => "op",
-            #[cfg(feature = "vault")]
-            Backend::Vault(_) => "vault",
-            #[cfg(feature = "bw")]
-            Backend::Bw(_) => "bw",
-            #[cfg(feature = "gcp-sm")]
-            Backend::GcpSm(_) => "gcp-sm",
-            #[cfg(feature = "azure-kv")]
-            Backend::AzureKv(_) => "azure-kv",
-            Backend::Custom(b) => b.scheme(),
-        }
+    /// Wrap any type implementing `hasp_core::Backend`.
+    pub fn new<T>(inner: T) -> Self
+    where
+        T: hasp_core::Backend + 'static,
+    {
+        Self(Arc::new(inner))
+    }
+
+    #[cfg(feature = "aws-sm")]
+    pub fn aws_sm() -> Self {
+        Self::new(AwsSmBackend::new())
+    }
+
+    #[cfg(feature = "aws-ssm")]
+    pub fn aws_ssm() -> Self {
+        Self::new(AwsSsmBackend::new())
+    }
+
+    #[cfg(feature = "env")]
+    pub fn env() -> Self {
+        Self::new(EnvBackend)
+    }
+
+    #[cfg(feature = "file")]
+    pub fn file() -> Self {
+        Self::new(FileBackend)
+    }
+
+    #[cfg(feature = "keyring")]
+    pub fn keyring() -> Self {
+        Self::new(KeyringBackend::new())
+    }
+
+    #[cfg(feature = "op")]
+    pub fn op() -> Self {
+        Self::new(OpBackend::new())
+    }
+
+    #[cfg(feature = "vault")]
+    pub fn vault() -> Self {
+        Self::new(VaultBackend::new())
+    }
+
+    #[cfg(feature = "bw")]
+    pub fn bw() -> Self {
+        Self::new(BwBackend::new())
+    }
+
+    #[cfg(feature = "gcp-sm")]
+    pub fn gcp_sm() -> Self {
+        Self::new(GcpSmBackend::new())
+    }
+
+    #[cfg(feature = "azure-kv")]
+    pub fn azure_kv() -> Self {
+        Self::new(AzureKvBackend::new())
+    }
+
+    /// Wrap an externally-provided backend.
+    pub fn custom(inner: Arc<dyn hasp_core::Backend>) -> Self {
+        Self(inner)
+    }
+}
+
+impl hasp_core::Backend for Backend {
+    fn scheme(&self) -> &'static str {
+        self.0.scheme()
     }
 
     fn get(&self, url: &Url) -> Result<SecretString, Error> {
-        dispatch_backend!(self, get, url)
+        self.0.get(url)
     }
 
     fn put(&self, url: &Url, value: &SecretString) -> Result<(), Error> {
-        dispatch_backend!(self, put, url, value)
+        self.0.put(url, value)
     }
 
     fn list(&self, url: &Url) -> Result<Vec<Entry>, Error> {
-        dispatch_backend!(self, list, url)
+        self.0.list(url)
     }
 
     fn delete(&self, url: &Url) -> Result<(), Error> {
-        dispatch_backend!(self, delete, url)
+        self.0.delete(url)
     }
 
     fn exists(&self, url: &Url) -> Result<bool, Error> {
-        dispatch_backend!(self, exists, url)
+        self.0.exists(url)
     }
 }
 
@@ -245,49 +216,25 @@ impl StoreBuilder {
 
         if self.defaults {
             #[cfg(feature = "aws-sm")]
-            {
-                store.register(Backend::AwsSm(AwsSmBackend::with_proxy(self.proxy.clone())));
-            }
+            store.register(Backend::new(AwsSmBackend::with_proxy(self.proxy.clone())));
             #[cfg(feature = "aws-ssm")]
-            {
-                store.register(Backend::AwsSsm(AwsSsmBackend::with_proxy(
-                    self.proxy.clone(),
-                )));
-            }
+            store.register(Backend::new(AwsSsmBackend::with_proxy(self.proxy.clone())));
             #[cfg(feature = "env")]
-            {
-                store.register(Backend::Env(EnvBackend));
-            }
+            store.register(Backend::env());
             #[cfg(feature = "file")]
-            {
-                store.register(Backend::File(FileBackend));
-            }
+            store.register(Backend::file());
             #[cfg(feature = "keyring")]
-            {
-                store.register(Backend::Keyring(KeyringBackend::new()));
-            }
+            store.register(Backend::keyring());
             #[cfg(feature = "op")]
-            {
-                store.register(Backend::Op(OpBackend::new()));
-            }
+            store.register(Backend::op());
             #[cfg(feature = "vault")]
-            {
-                store.register(Backend::Vault(VaultBackend::with_proxy(self.proxy.clone())));
-            }
+            store.register(Backend::new(VaultBackend::with_proxy(self.proxy.clone())));
             #[cfg(feature = "bw")]
-            {
-                store.register(Backend::Bw(BwBackend::new()));
-            }
+            store.register(Backend::bw());
             #[cfg(feature = "gcp-sm")]
-            {
-                store.register(Backend::GcpSm(GcpSmBackend::with_proxy(self.proxy.clone())));
-            }
+            store.register(Backend::new(GcpSmBackend::with_proxy(self.proxy.clone())));
             #[cfg(feature = "azure-kv")]
-            {
-                store.register(Backend::AzureKv(AzureKvBackend::with_proxy(
-                    self.proxy.clone(),
-                )));
-            }
+            store.register(Backend::new(AzureKvBackend::with_proxy(self.proxy.clone())));
         }
 
         for backend in self.extra_backends {
