@@ -126,8 +126,8 @@ mod cache_tests {
 
     #[test]
     fn put_invalidates_cache() {
-        use tempfile::NamedTempFile;
         use std::io::Write;
+        use tempfile::NamedTempFile;
 
         let mut file = NamedTempFile::new().unwrap();
         file.write_all(b"old-value").unwrap();
@@ -259,97 +259,50 @@ mod file_tests {
 #[cfg(feature = "op")]
 mod op_tests {
     use super::*;
-    use std::process::Command;
-
-    fn op_available() -> bool {
-        Command::new("op").arg("--version").status().is_ok()
-    }
+    use hasp_core::test_utils::FakeOpGuard;
 
     #[test]
     fn op_get_roundtrip() {
-        if !op_available() {
-            return;
-        }
-
         let _lock = ENV_LOCK.lock().unwrap();
-        let store = Store::with_defaults();
+        let _fake = FakeOpGuard::canonical();
+        let _env = EnvGuard::set("OP_SERVICE_ACCOUNT_TOKEN", "fake-token");
 
-        // A real roundtrip requires a 1Password account. Without one,
-        // the test asserts only that the backend returns a hasp Error
-        // rather than panicking or leaking stderr.
-        let result = store.get("op://test-vault/test-item/test-field");
-        assert!(result.is_err());
+        let store = Store::builder().register(hasp::Backend::op()).build();
+        let secret = store.get("op://test-vault/test-item/field1").unwrap();
+        assert_eq!(secret.expose_secret(), "canned-secret-value-1");
     }
 
     #[test]
     fn op_exists() {
-        if !op_available() {
-            return;
-        }
-
         let _lock = ENV_LOCK.lock().unwrap();
-        let store = Store::with_defaults();
+        let _fake = FakeOpGuard::canonical();
+        let _env = EnvGuard::set("OP_SERVICE_ACCOUNT_TOKEN", "fake-token");
 
-        let result = store.exists("op://test-vault/test-item/test-field");
-        assert!(result.is_ok() || result.is_err());
+        let store = Store::builder().register(hasp::Backend::op()).build();
+        assert!(store.exists("op://test-vault/test-item/field1").unwrap());
+        assert!(!store.exists("op://missing-vault/test-item/field1").unwrap());
     }
 
     #[test]
     fn op_not_found() {
-        if !op_available() {
-            return;
-        }
-
         let _lock = ENV_LOCK.lock().unwrap();
-        let store = Store::with_defaults();
+        let _fake = FakeOpGuard::canonical();
+        let _env = EnvGuard::set("OP_SERVICE_ACCOUNT_TOKEN", "fake-token");
 
+        let store = Store::builder().register(hasp::Backend::op()).build();
         let err = store
-            .get("op://nonexistent-vault/nonexistent-item/nonexistent-field")
+            .get("op://test-vault/missing-item/field1")
             .unwrap_err();
-
-        assert!(
-            matches!(
-                err,
-                hasp::Error::NotFound(_)
-                    | hasp::Error::AuthenticationFailed(_)
-                    | hasp::Error::Backend { .. }
-            ),
-            "unexpected error variant: {err:?}"
-        );
+        assert!(matches!(err, hasp::Error::NotFound(_)));
     }
 
     #[test]
     fn op_not_authenticated() {
-        if !op_available() {
-            return;
-        }
-
         let _lock = ENV_LOCK.lock().unwrap();
+        let _fake = FakeOpGuard::canonical();
 
-        let old_service = std::env::var("OP_SERVICE_ACCOUNT_TOKEN").ok();
-        let old_connect_token = std::env::var("OP_CONNECT_TOKEN").ok();
-        let old_connect_host = std::env::var("OP_CONNECT_HOST").ok();
-
-        std::env::remove_var("OP_SERVICE_ACCOUNT_TOKEN");
-        std::env::remove_var("OP_CONNECT_TOKEN");
-        std::env::remove_var("OP_CONNECT_HOST");
-        for (k, _) in std::env::vars().filter(|(k, _)| k.starts_with("OP_SESSION_")) {
-            std::env::remove_var(&k);
-        }
-
-        let store = Store::with_defaults();
+        let store = Store::builder().register(hasp::Backend::op()).build();
         let err = store.get("op://vault/item/field").unwrap_err();
-
-        if let Some(v) = old_service {
-            std::env::set_var("OP_SERVICE_ACCOUNT_TOKEN", v);
-        }
-        if let Some(v) = old_connect_token {
-            std::env::set_var("OP_CONNECT_TOKEN", v);
-        }
-        if let Some(v) = old_connect_host {
-            std::env::set_var("OP_CONNECT_HOST", v);
-        }
-
         assert!(
             matches!(err, hasp::Error::AuthenticationFailed(_)),
             "expected AuthenticationFailed when no ambient credentials are present, got {err:?}"
@@ -716,86 +669,51 @@ mod bw_disabled_tests {
 #[cfg(feature = "bw")]
 mod bw_tests {
     use super::*;
-    use std::process::Command;
-
-    fn bw_available() -> bool {
-        Command::new("bw").arg("--version").status().is_ok()
-    }
+    use hasp_core::test_utils::FakeBwGuard;
 
     #[test]
     fn bw_get_roundtrip() {
-        if !bw_available() {
-            return;
-        }
-
         let _lock = ENV_LOCK.lock().unwrap();
-        let store = Store::with_defaults();
+        let _fake = FakeBwGuard::canonical();
+        let _env = EnvGuard::set("BW_SESSION", "fake-session");
 
-        let result = store.get("bw://test-item/login.password");
-        assert!(
-            matches!(
-                result,
-                Ok(_) | Err(hasp::Error::NotFound(_)) | Err(hasp::Error::Backend { .. })
-            ),
-            "unexpected error: {result:?}"
-        );
+        let store = Store::builder().register(hasp::Backend::bw()).build();
+        let secret = store.get("bw://test-item/login.password").unwrap();
+        assert_eq!(secret.expose_secret(), "testpass");
     }
 
     #[test]
     fn bw_exists() {
-        if !bw_available() {
-            return;
-        }
-
         let _lock = ENV_LOCK.lock().unwrap();
-        let store = Store::with_defaults();
+        let _fake = FakeBwGuard::canonical();
+        let _env = EnvGuard::set("BW_SESSION", "fake-session");
 
-        let result = store.exists("bw://test-item/field.path");
-        assert!(
-            matches!(
-                result,
-                Ok(_) | Err(hasp::Error::NotFound(_)) | Err(hasp::Error::Backend { .. })
-            ),
-            "unexpected error: {result:?}"
-        );
+        let store = Store::builder().register(hasp::Backend::bw()).build();
+
+        // Fake backend returns success for `test-item`.
+        assert!(store.exists("bw://test-item/login.password").unwrap());
     }
 
     #[test]
     fn bw_not_found() {
-        if !bw_available() {
-            return;
-        }
-
         let _lock = ENV_LOCK.lock().unwrap();
-        let store = Store::with_defaults();
+        let _fake = FakeBwGuard::canonical();
+        let _env = EnvGuard::set("BW_SESSION", "fake-session");
 
+        let store = Store::builder().register(hasp::Backend::bw()).build();
         let err = store
-            .get("bw://nonexistent-item/login.password")
+            .get("bw://missing-item/login.password")
             .unwrap_err();
-
-        assert!(
-            matches!(err, hasp::Error::NotFound(_) | hasp::Error::Backend { .. }),
-            "expected NotFound or Backend error for a missing item, got {err:?}"
-        );
+        assert!(matches!(err, hasp::Error::NotFound(_)));
     }
 
     #[test]
     fn bw_not_authenticated() {
-        if !bw_available() {
-            return;
-        }
-
         let _lock = ENV_LOCK.lock().unwrap();
+        let _fake = FakeBwGuard::canonical();
 
-        let old_session = std::env::var("BW_SESSION").ok();
-        std::env::remove_var("BW_SESSION");
-
-        let store = Store::with_defaults();
+        let store = Store::builder().register(hasp::Backend::bw()).build();
         let err = store.get("bw://item/field.path").unwrap_err();
-
-        if let Some(v) = old_session {
-            std::env::set_var("BW_SESSION", v);
-        }
 
         assert!(
             matches!(err, hasp::Error::AuthenticationFailed(_)),

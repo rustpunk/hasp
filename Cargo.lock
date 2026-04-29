@@ -1569,6 +1569,7 @@ name = "hasp-core"
 version = "0.1.0-alpha"
 dependencies = [
  "secrecy",
+ "tempfile",
  "thiserror 1.0.69",
  "url",
 ]

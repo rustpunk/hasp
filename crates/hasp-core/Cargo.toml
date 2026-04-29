@@ -8,9 +8,10 @@ repository.workspace = true
 description = "Core contracts, errors, and traits for hasp."
 
 [features]
-test-utils = []
+test-utils = ["dep:tempfile"]
 
 [dependencies]
 url = "2.5"
 thiserror = "1.0"
 secrecy = "0.10"
+tempfile = { version = "3", optional = true }
