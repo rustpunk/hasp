@@ -5,6 +5,7 @@
 //! `env://` and `file://` backends only.
 
 use std::process::{Command, Stdio};
+use hasp_core::test_utils::{EnvGuard, ENV_LOCK};
 
 fn hasp() -> Command {
     let mut path = std::env::current_exe().unwrap();
@@ -32,6 +33,7 @@ fn cli_help_exits_zero() {
 
 #[test]
 fn cli_get_env_roundtrip() {
+    let _env_lock = ENV_LOCK.lock().unwrap();
     let _guard = EnvGuard::set("HASP_CLI_TEST_SECRET", "my-secret-value");
 
     let output = hasp()
@@ -52,6 +54,7 @@ fn cli_get_env_roundtrip() {
 
 #[test]
 fn cli_exists_env() {
+    let _env_lock = ENV_LOCK.lock().unwrap();
     let _guard = EnvGuard::set("HASP_CLI_TEST_EXISTS", "1");
 
     let output = hasp()
@@ -140,6 +143,7 @@ my_secret = "env://HASP_CLI_PROFILE_SECRET"
     )
     .unwrap();
 
+    let _env_lock = ENV_LOCK.lock().unwrap();
     let _guard = EnvGuard::set("HASP_CLI_PROFILE_SECRET", "profile-works");
 
     let output = hasp()
@@ -525,6 +529,7 @@ fn cli_complete_dynamic_file() {
 
 #[test]
 fn cli_complete_dynamic_env_var() {
+    let _env_lock = ENV_LOCK.lock().unwrap();
     let _guard = EnvGuard::set("HASP_COMPLETE_TEST_VAR", "test-value");
 
     let output = hasp()
@@ -586,6 +591,7 @@ fn cli_global_flags_in_help() {
 
 #[test]
 fn cli_verbose_flag() {
+    let _env_lock = ENV_LOCK.lock().unwrap();
     let _guard = EnvGuard::set("HASP_VERBOSE_TEST", "verbose-works");
     let output = hasp()
         .args(["get", "-v", "env://HASP_VERBOSE_TEST"])
@@ -607,6 +613,7 @@ fn cli_verbose_flag() {
 
 #[test]
 fn cli_quiet_flag_overrides_verbose() {
+    let _env_lock = ENV_LOCK.lock().unwrap();
     let _guard = EnvGuard::set("HASP_QUIET_TEST", "quiet-works");
     let output = hasp()
         .args(["get", "-q", "-v", "env://HASP_QUIET_TEST"])
@@ -627,29 +634,4 @@ fn cli_quiet_flag_overrides_verbose() {
     assert_eq!(stdout.trim_end(), "quiet-works");
 }
 
-// Guard that sets an environment variable for the duration of a test
-// and restores it afterward.
-struct EnvGuard {
-    key: String,
-    old: Option<String>,
-}
 
-impl EnvGuard {
-    fn set(key: &str, value: &str) -> Self {
-        let old = std::env::var(key).ok();
-        std::env::set_var(key, value);
-        Self {
-            key: key.into(),
-            old,
-        }
-    }
-}
-
-impl Drop for EnvGuard {
-    fn drop(&mut self) {
-        match &self.old {
-            Some(v) => std::env::set_var(&self.key, v),
-            None => std::env::remove_var(&self.key),
-        }
-    }
-}

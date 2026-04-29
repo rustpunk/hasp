@@ -219,20 +219,28 @@ impl Backend for BwBackend {
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
-        if success {
-            return Ok(true);
+        if !success {
+            let message = envelope
+                .get("message")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown bw error");
+            if message.eq_ignore_ascii_case("not found.") {
+                return Ok(false);
+            }
+            return Err(map_bw_response_error(message, &reference));
         }
 
-        let message = envelope
-            .get("message")
-            .and_then(|v| v.as_str())
-            .unwrap_or("unknown bw error");
+        let data = envelope.get("data").ok_or_else(|| Error::Backend {
+            scheme: "bw",
+            kind: BackendFailureKind::Permanent,
+            message: "bw response missing data field".into(),
+        })?;
 
-        if message.eq_ignore_ascii_case("not found.") {
-            return Ok(false);
+        match extract_field(data, &bw_url.field_path, &reference) {
+            Ok(_) => Ok(true),
+            Err(Error::NotFound(_)) => Ok(false),
+            Err(e) => Err(e),
         }
-
-        Err(map_bw_response_error(message, &reference))
     }
 }
 
@@ -471,34 +479,7 @@ fn extract_field(data: &serde_json::Value, path: &str, reference: &str) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-
-    struct EnvGuard {
-        key: String,
-        old: Option<String>,
-    }
-
-    impl EnvGuard {
-        fn set(key: &str, value: &str) -> Self {
-            let old = std::env::var(key).ok();
-            std::env::set_var(key, value);
-            Self {
-                key: key.into(),
-                old,
-            }
-        }
-    }
-
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            match &self.old {
-                Some(v) => std::env::set_var(&self.key, v),
-                None => std::env::remove_var(&self.key),
-            }
-        }
-    }
+use hasp_core::test_utils::{EnvGuard, ENV_LOCK};
 
     #[test]
     fn parse_valid_url() {

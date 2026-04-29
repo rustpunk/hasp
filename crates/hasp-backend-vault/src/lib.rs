@@ -273,7 +273,11 @@ impl Backend for VaultBackend {
             let entry_url = if vault_url.path.starts_with("/data/") {
                 let base_path = vault_url.path.trim_start_matches("/data/");
                 let parent = base_path.rfind('/').map(|i| &base_path[..i]).unwrap_or("");
-                format!("vault://{}/data/{}/{name}", vault_url.mount, parent)
+                if parent.is_empty() {
+                    format!("vault://{}/data/{name}", vault_url.mount)
+                } else {
+                    format!("vault://{}/data/{}/{name}", vault_url.mount, parent)
+                }
             } else {
                 format!("vault://{}/{name}", vault_url.mount)
             };
@@ -336,7 +340,7 @@ fn build_client(proxy: Option<&ProxyConfig>) -> Result<reqwest::blocking::Client
     let mut builder = reqwest::blocking::Client::builder().timeout(Duration::from_secs(10));
 
     if let Some(p) = proxy {
-        let reqwest_proxy = reqwest::Proxy::all(&p.url).map_err(|e| Error::Backend {
+        let reqwest_proxy = reqwest::Proxy::all(p.url_without_credentials()).map_err(|e| Error::Backend {
             scheme: "vault",
             kind: BackendFailureKind::Permanent,
             message: format!("invalid proxy URL: {e}"),
@@ -459,34 +463,7 @@ fn extract_secret(body: &serde_json::Value, field: Option<&str>) -> Result<Secre
 mod tests {
     use super::*;
     use hasp_core::ExposeSecret;
-    use std::sync::Mutex;
-
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-
-    struct EnvGuard {
-        key: String,
-        old: Option<String>,
-    }
-
-    impl EnvGuard {
-        fn set(key: &str, value: &str) -> Self {
-            let old = std::env::var(key).ok();
-            std::env::set_var(key, value);
-            Self {
-                key: key.into(),
-                old,
-            }
-        }
-    }
-
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            match &self.old {
-                Some(v) => std::env::set_var(&self.key, v),
-                None => std::env::remove_var(&self.key),
-            }
-        }
-    }
+    use hasp_core::test_utils::{EnvGuard, ENV_LOCK};
 
     #[test]
     fn parse_valid_url_with_field() {

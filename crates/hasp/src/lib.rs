@@ -119,6 +119,35 @@ pub enum Backend {
     Custom(Arc<dyn CustomBackend>),
 }
 
+/// Declaratively dispatches a method call to every built-in backend variant.
+macro_rules! dispatch_backend {
+    ($self:expr, $method:ident $(, $arg:expr)* $(,)?) => {
+        match $self {
+            #[cfg(feature = "aws-sm")]
+            Backend::AwsSm(b) => b.$method($($arg),*),
+            #[cfg(feature = "aws-ssm")]
+            Backend::AwsSsm(b) => b.$method($($arg),*),
+            #[cfg(feature = "env")]
+            Backend::Env(b) => b.$method($($arg),*),
+            #[cfg(feature = "file")]
+            Backend::File(b) => b.$method($($arg),*),
+            #[cfg(feature = "keyring")]
+            Backend::Keyring(b) => b.$method($($arg),*),
+            #[cfg(feature = "op")]
+            Backend::Op(b) => b.$method($($arg),*),
+            #[cfg(feature = "vault")]
+            Backend::Vault(b) => b.$method($($arg),*),
+            #[cfg(feature = "bw")]
+            Backend::Bw(b) => b.$method($($arg),*),
+            #[cfg(feature = "gcp-sm")]
+            Backend::GcpSm(b) => b.$method($($arg),*),
+            #[cfg(feature = "azure-kv")]
+            Backend::AzureKv(b) => b.$method($($arg),*),
+            Backend::Custom(b) => b.$method($($arg),*),
+        }
+    };
+}
+
 impl Backend {
     /// Returns the URL scheme handled by this backend instance.
     pub fn scheme(&self) -> &'static str {
@@ -148,133 +177,23 @@ impl Backend {
     }
 
     fn get(&self, url: &Url) -> Result<SecretString, Error> {
-        match self {
-            #[cfg(feature = "aws-sm")]
-            Backend::AwsSm(b) => b.get(url),
-            #[cfg(feature = "aws-ssm")]
-            Backend::AwsSsm(b) => b.get(url),
-            #[cfg(feature = "env")]
-            Backend::Env(b) => b.get(url),
-            #[cfg(feature = "file")]
-            Backend::File(b) => b.get(url),
-            #[cfg(feature = "keyring")]
-            Backend::Keyring(b) => b.get(url),
-            #[cfg(feature = "op")]
-            Backend::Op(b) => b.get(url),
-            #[cfg(feature = "vault")]
-            Backend::Vault(b) => b.get(url),
-            #[cfg(feature = "bw")]
-            Backend::Bw(b) => b.get(url),
-            #[cfg(feature = "gcp-sm")]
-            Backend::GcpSm(b) => b.get(url),
-            #[cfg(feature = "azure-kv")]
-            Backend::AzureKv(b) => b.get(url),
-            Backend::Custom(b) => b.get(url),
-        }
+        dispatch_backend!(self, get, url)
     }
 
     fn put(&self, url: &Url, value: &SecretString) -> Result<(), Error> {
-        match self {
-            #[cfg(feature = "aws-sm")]
-            Backend::AwsSm(b) => b.put(url, value),
-            #[cfg(feature = "aws-ssm")]
-            Backend::AwsSsm(b) => b.put(url, value),
-            #[cfg(feature = "env")]
-            Backend::Env(b) => b.put(url, value),
-            #[cfg(feature = "file")]
-            Backend::File(b) => b.put(url, value),
-            #[cfg(feature = "keyring")]
-            Backend::Keyring(b) => b.put(url, value),
-            #[cfg(feature = "op")]
-            Backend::Op(b) => b.put(url, value),
-            #[cfg(feature = "vault")]
-            Backend::Vault(b) => b.put(url, value),
-            #[cfg(feature = "bw")]
-            Backend::Bw(b) => b.put(url, value),
-            #[cfg(feature = "gcp-sm")]
-            Backend::GcpSm(b) => b.put(url, value),
-            #[cfg(feature = "azure-kv")]
-            Backend::AzureKv(b) => b.put(url, value),
-            Backend::Custom(b) => b.put(url, value),
-        }
+        dispatch_backend!(self, put, url, value)
     }
 
     fn list(&self, url: &Url) -> Result<Vec<Entry>, Error> {
-        match self {
-            #[cfg(feature = "aws-sm")]
-            Backend::AwsSm(b) => b.list(url),
-            #[cfg(feature = "aws-ssm")]
-            Backend::AwsSsm(b) => b.list(url),
-            #[cfg(feature = "env")]
-            Backend::Env(b) => b.list(url),
-            #[cfg(feature = "file")]
-            Backend::File(b) => b.list(url),
-            #[cfg(feature = "keyring")]
-            Backend::Keyring(b) => b.list(url),
-            #[cfg(feature = "op")]
-            Backend::Op(b) => b.list(url),
-            #[cfg(feature = "vault")]
-            Backend::Vault(b) => b.list(url),
-            #[cfg(feature = "bw")]
-            Backend::Bw(b) => b.list(url),
-            #[cfg(feature = "gcp-sm")]
-            Backend::GcpSm(b) => b.list(url),
-            #[cfg(feature = "azure-kv")]
-            Backend::AzureKv(b) => b.list(url),
-            Backend::Custom(b) => b.list(url),
-        }
+        dispatch_backend!(self, list, url)
     }
 
     fn delete(&self, url: &Url) -> Result<(), Error> {
-        match self {
-            #[cfg(feature = "aws-sm")]
-            Backend::AwsSm(b) => b.delete(url),
-            #[cfg(feature = "aws-ssm")]
-            Backend::AwsSsm(b) => b.delete(url),
-            #[cfg(feature = "env")]
-            Backend::Env(b) => b.delete(url),
-            #[cfg(feature = "file")]
-            Backend::File(b) => b.delete(url),
-            #[cfg(feature = "keyring")]
-            Backend::Keyring(b) => b.delete(url),
-            #[cfg(feature = "op")]
-            Backend::Op(b) => b.delete(url),
-            #[cfg(feature = "vault")]
-            Backend::Vault(b) => b.delete(url),
-            #[cfg(feature = "bw")]
-            Backend::Bw(b) => b.delete(url),
-            #[cfg(feature = "gcp-sm")]
-            Backend::GcpSm(b) => b.delete(url),
-            #[cfg(feature = "azure-kv")]
-            Backend::AzureKv(b) => b.delete(url),
-            Backend::Custom(b) => b.delete(url),
-        }
+        dispatch_backend!(self, delete, url)
     }
 
     fn exists(&self, url: &Url) -> Result<bool, Error> {
-        match self {
-            #[cfg(feature = "aws-sm")]
-            Backend::AwsSm(b) => b.exists(url),
-            #[cfg(feature = "aws-ssm")]
-            Backend::AwsSsm(b) => b.exists(url),
-            #[cfg(feature = "env")]
-            Backend::Env(b) => b.exists(url),
-            #[cfg(feature = "file")]
-            Backend::File(b) => b.exists(url),
-            #[cfg(feature = "keyring")]
-            Backend::Keyring(b) => b.exists(url),
-            #[cfg(feature = "op")]
-            Backend::Op(b) => b.exists(url),
-            #[cfg(feature = "vault")]
-            Backend::Vault(b) => b.exists(url),
-            #[cfg(feature = "bw")]
-            Backend::Bw(b) => b.exists(url),
-            #[cfg(feature = "gcp-sm")]
-            Backend::GcpSm(b) => b.exists(url),
-            #[cfg(feature = "azure-kv")]
-            Backend::AzureKv(b) => b.exists(url),
-            Backend::Custom(b) => b.exists(url),
-        }
+        dispatch_backend!(self, exists, url)
     }
 }
 
@@ -525,27 +444,36 @@ impl Store {
     }
 }
 
+use std::sync::OnceLock;
+
+/// Lazily-initialized default `Store` shared across free-function calls.
+static DEFAULT_STORE: OnceLock<Store> = OnceLock::new();
+
+fn default_store() -> &'static Store {
+    DEFAULT_STORE.get_or_init(Store::with_defaults)
+}
+
 /// Fetch a secret using a default `Store`.
 pub fn get(url: &str) -> Result<SecretString, Error> {
-    Store::with_defaults().get(url)
+    default_store().get(url)
 }
 
 /// Store a secret using a default `Store`.
 pub fn put(url: &str, value: &SecretString) -> Result<(), Error> {
-    Store::with_defaults().put(url, value)
+    default_store().put(url, value)
 }
 
 /// List entries using a default `Store`.
 pub fn list(url: &str) -> Result<Vec<Entry>, Error> {
-    Store::with_defaults().list(url)
+    default_store().list(url)
 }
 
 /// Delete a secret using a default `Store`.
 pub fn delete(url: &str) -> Result<(), Error> {
-    Store::with_defaults().delete(url)
+    default_store().delete(url)
 }
 
 /// Check whether a secret exists using a default `Store`.
 pub fn exists(url: &str) -> Result<bool, Error> {
-    Store::with_defaults().exists(url)
+    default_store().exists(url)
 }

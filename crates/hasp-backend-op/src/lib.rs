@@ -269,34 +269,23 @@ impl Backend for OpBackend {
         check_ambient_credentials()?;
 
         let op_url = OpUrl::try_from(url)?;
-        let args: [&str; 6] = [
-            "item",
-            "list",
-            "--vault",
-            &op_url.vault,
-            "--format=json",
-            "--no-color",
-        ];
+        let reference = format!("op://{}/{}/{}", op_url.vault, op_url.item, op_url.field);
+        let args: [&str; 3] = ["read", "--no-color", &reference];
 
         let output = run_op_with_timeout(&args, EXISTS_TIMEOUT)?;
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let exit_code = output.status.code().unwrap_or(-1);
-            let reference = format!("op://{}/{}/{}", op_url.vault, op_url.item, op_url.field);
-            return Err(map_op_error(&stderr, exit_code, &reference));
+        if output.status.success() {
+            return Ok(true);
         }
 
-        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let exit_code = output.status.code().unwrap_or(-1);
+        let err = map_op_error(&stderr, exit_code, &reference);
 
-        // Intentionally avoids serde. `op item list` returns
-        // metadata-only (title / category / vault / id); no secret
-        // material crosses the process boundary. String search is
-        // sufficient for an existence check and eliminates a heavy
-        // dependency.
-        let quoted = format!("\"title\":\"{}\"", op_url.item);
-        let spaced = format!("\"title\": \"{}\"", op_url.item);
-        Ok(stdout.contains(&quoted) || stdout.contains(&spaced))
+        match err {
+            Error::NotFound(_) => Ok(false),
+            _ => Err(err),
+        }
     }
 }
 
@@ -482,34 +471,7 @@ fn check_ambient_credentials() -> Result<(), Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-
-    struct EnvGuard {
-        key: String,
-        old: Option<String>,
-    }
-
-    impl EnvGuard {
-        fn set(key: &str, value: &str) -> Self {
-            let old = std::env::var(key).ok();
-            std::env::set_var(key, value);
-            Self {
-                key: key.into(),
-                old,
-            }
-        }
-    }
-
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            match &self.old {
-                Some(v) => std::env::set_var(&self.key, v),
-                None => std::env::remove_var(&self.key),
-            }
-        }
-    }
+    use hasp_core::test_utils::{EnvGuard, ENV_LOCK};
 
     #[test]
     fn parse_valid_url() {

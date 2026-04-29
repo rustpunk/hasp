@@ -1,37 +1,8 @@
 use hasp::ExposeSecret;
 use hasp::Store;
 use std::env;
-use std::sync::Mutex;
 
-// Guard that sets an environment variable for the duration of a test
-// and restores it afterward. Uses a global lock to prevent concurrent
-// env-var mutations across tests.
-static ENV_LOCK: Mutex<()> = Mutex::new(());
-
-struct EnvGuard {
-    key: String,
-    old: Option<String>,
-}
-
-impl EnvGuard {
-    fn set(key: &str, value: &str) -> Self {
-        let old = env::var(key).ok();
-        env::set_var(key, value);
-        Self {
-            key: key.into(),
-            old,
-        }
-    }
-}
-
-impl Drop for EnvGuard {
-    fn drop(&mut self) {
-        match &self.old {
-            Some(v) => env::set_var(&self.key, v),
-            None => env::remove_var(&self.key),
-        }
-    }
-}
+pub use hasp_core::test_utils::{EnvGuard, ENV_LOCK};
 
 #[cfg(feature = "env")]
 mod env_tests {

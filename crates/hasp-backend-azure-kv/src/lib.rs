@@ -165,7 +165,7 @@ impl AzureKvBackend {
         let mut builder = reqwest::blocking::Client::builder().timeout(Duration::from_secs(10));
 
         if let Some(p) = &self.proxy {
-            let proxy = reqwest::Proxy::all(&p.url)
+            let proxy = reqwest::Proxy::all(p.url_without_credentials())
                 .expect("reqwest proxy construction is infallible with a valid URL");
             builder = builder.proxy(proxy);
         }

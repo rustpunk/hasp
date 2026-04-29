@@ -159,7 +159,7 @@ impl GcpSmBackend {
             reqwest::blocking::Client::builder().timeout(std::time::Duration::from_secs(10));
 
         if let Some(p) = &self.proxy {
-            let proxy = reqwest::Proxy::all(&p.url)
+            let proxy = reqwest::Proxy::all(p.url_without_credentials())
                 .expect("reqwest proxy construction is infallible with a valid URL");
             builder = builder.proxy(proxy);
         }
@@ -309,8 +309,22 @@ impl Backend for GcpSmBackend {
         let gcp_url = GcpSmUrl::try_from(url)?;
         let token = self.token()?;
 
-        let mut request_url =
-            format!("{}/projects/{}/secrets", Self::BASE_URL, gcp_url.project_id,);
+        let prefix = gcp_url.secret_id.trim_matches('/');
+
+        let mut request_url = Url::parse(
+            &format!("{}/projects/{}/secrets", Self::BASE_URL, gcp_url.project_id),
+        )
+        .map_err(|e| Error::Backend {
+            scheme: Self::SCHEME,
+            kind: BackendFailureKind::Permanent,
+            message: format!("failed to build list URL: {e}"),
+        })?;
+
+        if !prefix.is_empty() {
+            request_url
+                .query_pairs_mut()
+                .append_pair("filter", &format!("name:projects/{}/secrets/{}", gcp_url.project_id, prefix));
+        }
 
         let client = self.client();
         let mut entries = Vec::new();
@@ -318,7 +332,7 @@ impl Backend for GcpSmBackend {
 
         for _ in 0..MAX_PAGES {
             let response = client
-                .get(&request_url)
+                .get(request_url.as_str())
                 .bearer_auth(&token)
                 .send()
                 .map_err(map_reqwest_error)?;
@@ -353,12 +367,24 @@ impl Backend for GcpSmBackend {
 
             match payload.next_page_token {
                 Some(ref t) if !t.is_empty() => {
-                    request_url = format!(
-                        "{}/projects/{}/secrets?pageToken={}",
-                        Self::BASE_URL,
-                        gcp_url.project_id,
-                        t,
-                    );
+                    request_url = Url::parse(
+                        &format!(
+                            "{}/projects/{}/secrets?pageToken={}",
+                            Self::BASE_URL,
+                            gcp_url.project_id,
+                            t,
+                        ),
+                    )
+                    .map_err(|e| Error::Backend {
+                        scheme: Self::SCHEME,
+                        kind: BackendFailureKind::Permanent,
+                        message: format!("failed to build paginated list URL: {e}"),
+                    })?;
+                    if !prefix.is_empty() {
+                        request_url
+                            .query_pairs_mut()
+                            .append_pair("filter", &format!("name:projects/{}/secrets/{}", gcp_url.project_id, prefix));
+                    }
                 }
                 _ => break,
             }

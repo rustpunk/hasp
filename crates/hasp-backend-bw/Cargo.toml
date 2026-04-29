@@ -14,3 +14,4 @@ url = "2.5"
 
 [dev-dependencies]
 url = "2.5"
+hasp-core = { path = "../hasp-core", features = ["test-utils"] }

@@ -1554,6 +1554,7 @@ dependencies = [
  "clap_mangen",
  "dirs",
  "hasp",
+ "hasp-core",
  "rpassword",
  "secrecy",
  "serde",

@@ -29,6 +29,9 @@ pub struct ProxyConfig {
     pub username: Option<String>,
     /// Password for Basic auth (optional).
     pub password: Option<SecretString>,
+    /// Original scheme (http or https) — preserved so
+    /// `url_without_credentials` reconstructs the correct URL.
+    scheme: String,
 }
 
 impl std::fmt::Debug for ProxyConfig {
@@ -85,6 +88,7 @@ impl ProxyConfig {
             port,
             username,
             password,
+            scheme: parsed.scheme().to_string(),
         })
     }
 
@@ -95,7 +99,7 @@ impl ProxyConfig {
     /// `http://proxy:8080` so the library handles auth itself via the
     /// username/password fields.
     pub fn url_without_credentials(&self) -> String {
-        format!("http://{}:{}", self.host, self.port)
+        format!("{}://{}:{}", self.scheme, self.host, self.port)
     }
 }
 
@@ -243,6 +247,12 @@ mod tests {
     fn url_without_credentials_strips_auth() {
         let cfg = ProxyConfig::parse("http://user:pass@proxy:3128").unwrap();
         assert_eq!(cfg.url_without_credentials(), "http://proxy:3128");
+    }
+
+    #[test]
+    fn url_without_credentials_preserves_https() {
+        let cfg = ProxyConfig::parse("https://user:pass@proxy:3128").unwrap();
+        assert_eq!(cfg.url_without_credentials(), "https://proxy:3128");
     }
 
     #[test]

@@ -39,3 +39,4 @@ serde_json = "1"
 [dev-dependencies]
 tempfile = "3"
 url = "2.5"
+hasp-core = { path = "../hasp-core", features = ["test-utils"] }
