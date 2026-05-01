@@ -197,26 +197,7 @@ impl StoreBuilder {
         store.ttl = self.ttl;
 
         if self.defaults {
-            #[cfg(feature = "aws-sm")]
-            store.register(Arc::new(AwsSmBackend::with_proxy(self.proxy.clone())));
-            #[cfg(feature = "aws-ssm")]
-            store.register(Arc::new(AwsSsmBackend::with_proxy(self.proxy.clone())));
-            #[cfg(feature = "env")]
-            store.register(crate::env());
-            #[cfg(feature = "file")]
-            store.register(crate::file());
-            #[cfg(feature = "keyring")]
-            store.register(crate::keyring());
-            #[cfg(feature = "op")]
-            store.register(crate::op());
-            #[cfg(feature = "vault")]
-            store.register(Arc::new(VaultBackend::with_proxy(self.proxy.clone())));
-            #[cfg(feature = "bw")]
-            store.register(crate::bw());
-            #[cfg(feature = "gcp-sm")]
-            store.register(Arc::new(GcpSmBackend::with_proxy(self.proxy.clone())));
-            #[cfg(feature = "azure-kv")]
-            store.register(Arc::new(AzureKvBackend::with_proxy(self.proxy.clone())));
+            register_default_backends(&mut store, &self.proxy);
         }
 
         for backend in self.extra_backends {
@@ -231,6 +212,34 @@ impl Default for StoreBuilder {
     fn default() -> Self {
         Self::empty()
     }
+}
+
+/// Register all default backends enabled by Cargo features.
+///
+/// Each backend crate is feature-gated so only enabled backends are
+/// included in the final binary. Proxy configuration is passed to
+/// backends that support HTTP CONNECT/SOCKS5 proxies.
+fn register_default_backends(store: &mut Store, proxy: &Option<ProxyConfig>) {
+    #[cfg(feature = "aws-sm")]
+    store.register(Arc::new(AwsSmBackend::with_proxy(proxy.clone())));
+    #[cfg(feature = "aws-ssm")]
+    store.register(Arc::new(AwsSsmBackend::with_proxy(proxy.clone())));
+    #[cfg(feature = "env")]
+    store.register(crate::env());
+    #[cfg(feature = "file")]
+    store.register(crate::file());
+    #[cfg(feature = "keyring")]
+    store.register(crate::keyring());
+    #[cfg(feature = "op")]
+    store.register(crate::op());
+    #[cfg(feature = "vault")]
+    store.register(Arc::new(VaultBackend::with_proxy(proxy.clone())));
+    #[cfg(feature = "bw")]
+    store.register(crate::bw());
+    #[cfg(feature = "gcp-sm")]
+    store.register(Arc::new(GcpSmBackend::with_proxy(proxy.clone())));
+    #[cfg(feature = "azure-kv")]
+    store.register(Arc::new(AzureKvBackend::with_proxy(proxy.clone())));
 }
 
 struct CacheEntry {
@@ -346,7 +355,7 @@ impl Store {
             if let Ok(cache) = self.cache.read() {
                 cache
                     .get(url)
-                    .map_or(false, |entry| entry.fetched_at.elapsed() <= ttl)
+                    .is_some_and(|entry| entry.fetched_at.elapsed() <= ttl)
             } else {
                 false
             }
@@ -465,6 +474,65 @@ impl Store {
             .get(scheme)
             .ok_or_else(|| Error::UnknownScheme(scheme.to_owned()))?;
         backend.exists(&parsed_url)
+    }
+
+    /// Fetch multiple secrets by URL, returning per-item results.
+    ///
+    /// Cache hits are deduplicated: identical URLs share the same
+    /// backend call. Errors are collected per item; the method never
+    /// short-circuits on the first failure.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use hasp::Store;
+    ///
+    /// let store = Store::with_defaults();
+    /// let results = store.batch_get(&["env://HOME", "env://USER", "env://MISSING"]);
+    /// ```
+    pub fn batch_get(&self, urls: &[&str]) -> Vec<Result<SecretString, Error>> {
+        let mut out = Vec::with_capacity(urls.len());
+        // Deduplicate identical URLs to avoid redundant backend calls.
+        let mut resolved: HashMap<String, Result<SecretString, Error>> = HashMap::new();
+
+        for url in urls {
+            if let Some(cached) = resolved.get(*url) {
+                out.push(cached.clone());
+                continue;
+            }
+
+            let result = self.get(url);
+            resolved.insert(url.to_string(), result.clone());
+            out.push(result);
+        }
+
+        out
+    }
+
+    /// Store multiple secrets by URL, returning per-item results.
+    ///
+    /// Each item is processed independently; errors are collected
+    /// per item and successful puts invalidate the corresponding
+    /// cache entry.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use hasp::{Store, SecretString};
+    ///
+    /// let store = Store::with_defaults();
+    /// let items: Vec<(&str, &SecretString)> = vec![];
+    /// let results = store.bulk_put(&items);
+    /// ```
+    pub fn bulk_put(&self, items: &[(&str, &SecretString)]) -> Vec<Result<(), Error>> {
+        items
+            .iter()
+            .map(|(url, value)| {
+                let result = self.put(url, value);
+                // Cache invalidation is already handled by `put`.
+                result
+            })
+            .collect()
     }
 }
 

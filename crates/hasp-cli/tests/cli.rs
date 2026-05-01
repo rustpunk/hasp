@@ -645,3 +645,78 @@ fn cli_quiet_flag_overrides_verbose() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert_eq!(stdout.trim_end(), "quiet-works");
 }
+
+#[test]
+fn cli_init_creates_config_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let profiles_path = dir.path().join("profiles.toml");
+
+    let output = hasp()
+        .env("HASP_PROFILES_PATH", &profiles_path)
+        .args(["init"])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "hasp init failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(profiles_path.is_file(), "profiles.toml should be created");
+    let contents = std::fs::read_to_string(&profiles_path).unwrap();
+    assert!(
+        contents.contains("[profiles.example]"),
+        "template should contain example profile, got: {contents}"
+    );
+}
+
+#[test]
+fn cli_init_idempotent_without_force() {
+    let dir = tempfile::tempdir().unwrap();
+    let profiles_path = dir.path().join("profiles.toml");
+    std::fs::write(&profiles_path, "existing").unwrap();
+
+    let output = hasp()
+        .env("HASP_PROFILES_PATH", &profiles_path)
+        .args(["init"])
+        .output()
+        .unwrap();
+
+    assert!(
+        !output.status.success(),
+        "hasp init without --force should fail when file exists"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("already exists") || stderr.contains("Use --force"),
+        "expected 'already exists' error, got: {stderr}"
+    );
+
+    let contents = std::fs::read_to_string(&profiles_path).unwrap();
+    assert_eq!(contents, "existing", "file should be untouched");
+}
+
+#[test]
+fn cli_init_force_overwrites() {
+    let dir = tempfile::tempdir().unwrap();
+    let profiles_path = dir.path().join("profiles.toml");
+    std::fs::write(&profiles_path, "existing").unwrap();
+
+    let output = hasp()
+        .env("HASP_PROFILES_PATH", &profiles_path)
+        .args(["init", "--force"])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "hasp init --force failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let contents = std::fs::read_to_string(&profiles_path).unwrap();
+    assert!(
+        contents.contains("[profiles.example]"),
+        "template should overwrite existing, got: {contents}"
+    );
+}

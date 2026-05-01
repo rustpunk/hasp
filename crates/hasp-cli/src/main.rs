@@ -4,6 +4,7 @@ use secrecy::ExposeSecret;
 use std::io::{self, IsTerminal, Read, Write};
 
 mod completions;
+mod config_init;
 mod list_format;
 mod profiles;
 use list_format::{format_list, Format};
@@ -73,6 +74,12 @@ enum Command {
         #[arg(value_hint = ValueHint::AnyPath, add = ArgValueCompleter::new(completions::complete_address))]
         address: String,
     },
+    /// Initialize a default `profiles.toml` in the platform config dir.
+    Init {
+        /// Overwrite existing config file.
+        #[arg(long)]
+        force: bool,
+    },
     /// Generate a man page for the `hasp` binary.
     ///
     /// Hidden from help to keep the CLI surface minimal.
@@ -101,6 +108,11 @@ fn main() {
 }
 
 fn run(cli: Cli) -> Result<(), String> {
+    // Init does not need profiles or a store.
+    if let Command::Init { force } = &cli.command {
+        return config_init::init(*force);
+    }
+
     let profiles =
         profiles::load_profiles().map_err(|e| format!("failed to load profiles: {e}"))?;
 
@@ -163,6 +175,9 @@ fn run(cli: Cli) -> Result<(), String> {
             let url = resolve(&address, &profiles)?;
             let exists = store.exists(&url).map_err(fmt_error)?;
             std::process::exit(if exists { 0 } else { 1 });
+        }
+        Command::Init { force } => {
+            config_init::init(force)?;
         }
         Command::Complete { shell } => {
             let mut app = Cli::command();
@@ -242,7 +257,7 @@ fn command_address(cli: &Cli) -> Option<&str> {
         | Command::List { address, .. }
         | Command::Delete { address }
         | Command::Exists { address } => Some(address.as_str()),
-        Command::Man | Command::Complete { .. } => None,
+        Command::Init { .. } | Command::Man | Command::Complete { .. } => None,
     }
 }
 
@@ -254,6 +269,7 @@ fn command_verb(cli: &Cli) -> &'static str {
         Command::List { .. } => "list",
         Command::Delete { .. } => "delete",
         Command::Exists { .. } => "exists",
+        Command::Init { .. } => "init",
         Command::Man => "man",
         Command::Complete { .. } => "complete",
     }
@@ -268,7 +284,7 @@ fn command_addresses(cli: &Cli) -> Vec<&str> {
         Command::List { address, .. } => vec![address.as_str()],
         Command::Delete { address } => vec![address.as_str()],
         Command::Exists { address } => vec![address.as_str()],
-        Command::Man | Command::Complete { .. } => vec![],
+        Command::Init { .. } | Command::Man | Command::Complete { .. } => vec![],
     }
 }
 

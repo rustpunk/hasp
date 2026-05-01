@@ -7,12 +7,14 @@
 
 pub mod error;
 pub mod proxy;
+pub mod retry;
 
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_utils;
 
 pub use error::{BackendFailureKind, Error};
 pub use proxy::{is_no_proxy, resolve_proxy_from_env, ProxyConfig};
+pub use retry::RetryBackend;
 pub use secrecy::{ExposeSecret, SecretString};
 
 use url::Url;
