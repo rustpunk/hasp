@@ -219,6 +219,7 @@ impl Default for StoreBuilder {
 /// Each backend crate is feature-gated so only enabled backends are
 /// included in the final binary. Proxy configuration is passed to
 /// backends that support HTTP CONNECT/SOCKS5 proxies.
+#[allow(unused_variables)]
 fn register_default_backends(store: &mut Store, proxy: &Option<ProxyConfig>) {
     #[cfg(feature = "aws-sm")]
     store.register(Arc::new(AwsSmBackend::with_proxy(proxy.clone())));
