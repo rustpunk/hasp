@@ -1,8 +1,8 @@
 #[cfg(feature = "env")]
 mod batch_tests {
-    use hasp::{Store, SecretString};
-    use hasp_core::test_utils::{EnvGuard, ENV_LOCK};
     use hasp::ExposeSecret;
+    use hasp::{SecretString, Store};
+    use hasp_core::test_utils::{EnvGuard, ENV_LOCK};
 
     #[test]
     fn batch_get_deduplicates_and_collects() {
@@ -39,23 +39,14 @@ mod batch_tests {
         let val_b = SecretString::new("val-b".into());
 
         let store = Store::with_defaults();
-        let items: Vec<(&str, &SecretString)> = vec![
-            (&url_a, &val_a),
-            (&url_b, &val_b),
-        ];
+        let items: Vec<(&str, &SecretString)> = vec![(&url_a, &val_a), (&url_b, &val_b)];
         let results = store.bulk_put(&items);
         assert_eq!(results.len(), 2);
         assert!(results[0].is_ok());
         assert!(results[1].is_ok());
 
-        assert_eq!(
-            std::fs::read_to_string(&path_a).unwrap(),
-            "val-a"
-        );
-        assert_eq!(
-            std::fs::read_to_string(&path_b).unwrap(),
-            "val-b"
-        );
+        assert_eq!(std::fs::read_to_string(&path_a).unwrap(), "val-a");
+        assert_eq!(std::fs::read_to_string(&path_b).unwrap(), "val-b");
     }
 
     #[test]
@@ -70,10 +61,7 @@ mod batch_tests {
         let val_file = SecretString::new("val".into());
 
         let store = Store::with_defaults();
-        let items: Vec<(&str, &SecretString)> = vec![
-            (&url_env, &val_env),
-            (&url_file, &val_file),
-        ];
+        let items: Vec<(&str, &SecretString)> = vec![(&url_env, &val_env), (&url_file, &val_file)];
         let results = store.bulk_put(&items);
         assert_eq!(results.len(), 2);
         assert!(results[0].is_err());
