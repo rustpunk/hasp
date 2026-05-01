@@ -52,6 +52,13 @@ jobs:
         if: matrix.feature-set.name == 'all-features'
         run: cargo doc --no-deps
 
+      - name: Install cargo-deny
+        if: matrix.feature-set.name == 'all-features'
+        run: |
+          curl -sL https://github.com/EmbarkStudios/cargo-deny/releases/download/0.19.1/cargo-deny-0.19.1-x86_64-unknown-linux-musl.tar.gz | tar xz
+          mkdir -p ~/.cargo/bin
+          mv cargo-deny-*/cargo-deny ~/.cargo/bin/
+
       - name: Deny check
         if: matrix.feature-set.name == 'all-features'
         run: cargo deny check
