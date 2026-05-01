@@ -55,11 +55,3 @@ jobs:
       - name: Deny check
         if: matrix.feature-set.name == 'all-features'
         run: cargo deny check
-
-      - name: Install mdbook
-        if: matrix.feature-set.name == 'all-features'
-        run: cargo install mdbook
-
-      - name: Build mdbook
-        if: matrix.feature-set.name == 'all-features'
-        run: mdbook build docs
