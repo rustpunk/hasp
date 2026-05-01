@@ -26,6 +26,10 @@ struct Cli {
     #[arg(short, long, global = true, action = ArgAction::Count)]
     verbose: u8,
 
+    /// Print what would happen without mutating anything.
+    #[arg(long, global = true)]
+    explain: bool,
+
     /// HTTP CONNECT proxy URL.
     #[arg(long, global = true)]
     proxy_url: Option<String>,
@@ -102,6 +106,19 @@ fn run(cli: Cli) -> Result<(), String> {
 
     let proxy = resolve_proxy(&cli, &profiles)?;
     let store = hasp::StoreBuilder::with_defaults().proxy(proxy).build();
+
+    if cli.explain {
+        let address = command_address(&cli);
+        if let Some(addr) = address {
+            let url = resolve(addr, &profiles)?;
+            let (_scheme, backend_scheme, cached) = store.resolve(&url).map_err(fmt_error)?;
+            eprintln!("URL:         {url}");
+            eprintln!("Backend:     {backend_scheme}");
+            eprintln!("Cache:       {}", if cached { "hit" } else { "miss" });
+            eprintln!("Operation:   {}", command_verb(&cli));
+            return Ok(());
+        }
+    }
 
     match cli.command {
         Command::Get { address } => {
@@ -215,6 +232,31 @@ fn resolve_proxy(
 
     // Layer 3: fall back to env vars handled by reqwest / AWS SDK natively.
     Ok(None)
+}
+
+/// Extract the primary address argument from the current CLI command.
+fn command_address(cli: &Cli) -> Option<&str> {
+    match &cli.command {
+        Command::Get { address }
+        | Command::Put { address, .. }
+        | Command::List { address, .. }
+        | Command::Delete { address }
+        | Command::Exists { address } => Some(address.as_str()),
+        Command::Man | Command::Complete { .. } => None,
+    }
+}
+
+/// Extract a human-readable verb from the current CLI command.
+fn command_verb(cli: &Cli) -> &'static str {
+    match &cli.command {
+        Command::Get { .. } => "get",
+        Command::Put { .. } => "put",
+        Command::List { .. } => "list",
+        Command::Delete { .. } => "delete",
+        Command::Exists { .. } => "exists",
+        Command::Man => "man",
+        Command::Complete { .. } => "complete",
+    }
 }
 
 /// Extract all address arguments from the current CLI command for proxy

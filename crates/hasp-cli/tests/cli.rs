@@ -501,29 +501,41 @@ api_key = "env://API_KEY"
 }
 
 #[test]
-fn cli_complete_dynamic_file() {
-    let dir = tempfile::tempdir().unwrap();
-    let file_path = dir.path().join("testfile.txt");
-    std::fs::write(&file_path, "").unwrap();
+fn cli_explain_env() {
+    let _env_lock = ENV_LOCK.lock().unwrap();
+    let _guard = EnvGuard::set("HASP_CLI_TEST_SECRET", "my-secret-value");
 
-    let prefix = format!("file://{}/", dir.path().to_string_lossy());
     let output = hasp()
-        .env("COMPLETE", "bash")
-        .env("_CLAP_COMPLETE_INDEX", "2")
-        .args(["--", "hasp", "get", &prefix])
+        .args(["--explain", "get", "env://HASP_CLI_TEST_SECRET"])
         .output()
         .unwrap();
 
     assert!(
         output.status.success(),
-        "dynamic file completion failed: {}",
+        "hasp --explain get failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let expected = format!("{prefix}testfile.txt");
     assert!(
-        stdout.contains(&expected),
-        "expected {expected} in completions, got: {stdout}"
+        stdout.is_empty(),
+        "--explain should not print secret to stdout"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("URL:         env://HASP_CLI_TEST_SECRET"),
+        "explain missing URL, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("Backend:     env"),
+        "explain missing backend, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("Cache:       miss"),
+        "explain missing cache state, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("Operation:   get"),
+        "explain missing operation, got: {stderr}"
     );
 }
 

@@ -64,7 +64,7 @@ fn store_empty_has_no_backends() {
 #[cfg(feature = "env")]
 #[test]
 fn store_with_backends_registers_only_given() {
-    let store = Store::with_backends(vec![hasp::Backend::env()]);
+    let store = Store::with_backends(vec![hasp::env()]);
 
     let result = store.get("env://HOME");
     assert!(result.is_ok() || result.is_err());
@@ -111,7 +111,7 @@ mod cache_tests {
 
         let store = Store::builder()
             .cache_ttl(Some(Duration::from_secs(60)))
-            .register(hasp::Backend::env())
+            .register(hasp::env())
             .build();
 
         let first = store.get("env://HASP_CACHE_TEST").unwrap();
@@ -135,7 +135,7 @@ mod cache_tests {
 
         let store = Store::builder()
             .cache_ttl(Some(Duration::from_secs(60)))
-            .register(hasp::Backend::file())
+            .register(hasp::file())
             .build();
 
         let url = format!("file://{path}");
@@ -267,7 +267,7 @@ mod op_tests {
         let _fake = FakeOpGuard::canonical();
         let _env = EnvGuard::set("OP_SERVICE_ACCOUNT_TOKEN", "fake-token");
 
-        let store = Store::builder().register(hasp::Backend::op()).build();
+        let store = Store::builder().register(hasp::op()).build();
         let secret = store.get("op://test-vault/test-item/field1").unwrap();
         assert_eq!(secret.expose_secret(), "canned-secret-value-1");
     }
@@ -278,7 +278,7 @@ mod op_tests {
         let _fake = FakeOpGuard::canonical();
         let _env = EnvGuard::set("OP_SERVICE_ACCOUNT_TOKEN", "fake-token");
 
-        let store = Store::builder().register(hasp::Backend::op()).build();
+        let store = Store::builder().register(hasp::op()).build();
         assert!(store.exists("op://test-vault/test-item/field1").unwrap());
         assert!(!store.exists("op://missing-vault/test-item/field1").unwrap());
     }
@@ -289,7 +289,7 @@ mod op_tests {
         let _fake = FakeOpGuard::canonical();
         let _env = EnvGuard::set("OP_SERVICE_ACCOUNT_TOKEN", "fake-token");
 
-        let store = Store::builder().register(hasp::Backend::op()).build();
+        let store = Store::builder().register(hasp::op()).build();
         let err = store
             .get("op://test-vault/missing-item/field1")
             .unwrap_err();
@@ -301,7 +301,7 @@ mod op_tests {
         let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _fake = FakeOpGuard::canonical();
 
-        let store = Store::builder().register(hasp::Backend::op()).build();
+        let store = Store::builder().register(hasp::op()).build();
         let err = store.get("op://vault/item/field").unwrap_err();
         assert!(
             matches!(err, hasp::Error::AuthenticationFailed(_)),
@@ -677,7 +677,7 @@ mod bw_tests {
         let _fake = FakeBwGuard::canonical();
         let _env = EnvGuard::set("BW_SESSION", "fake-session");
 
-        let store = Store::builder().register(hasp::Backend::bw()).build();
+        let store = Store::builder().register(hasp::bw()).build();
         let secret = store.get("bw://test-item/login.password").unwrap();
         assert_eq!(secret.expose_secret(), "testpass");
     }
@@ -688,7 +688,7 @@ mod bw_tests {
         let _fake = FakeBwGuard::canonical();
         let _env = EnvGuard::set("BW_SESSION", "fake-session");
 
-        let store = Store::builder().register(hasp::Backend::bw()).build();
+        let store = Store::builder().register(hasp::bw()).build();
 
         // Fake backend returns success for `test-item`.
         assert!(store.exists("bw://test-item/login.password").unwrap());
@@ -700,7 +700,7 @@ mod bw_tests {
         let _fake = FakeBwGuard::canonical();
         let _env = EnvGuard::set("BW_SESSION", "fake-session");
 
-        let store = Store::builder().register(hasp::Backend::bw()).build();
+        let store = Store::builder().register(hasp::bw()).build();
         let err = store.get("bw://missing-item/login.password").unwrap_err();
         assert!(matches!(err, hasp::Error::NotFound(_)));
     }
@@ -710,7 +710,7 @@ mod bw_tests {
         let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _fake = FakeBwGuard::canonical();
 
-        let store = Store::builder().register(hasp::Backend::bw()).build();
+        let store = Store::builder().register(hasp::bw()).build();
         let err = store.get("bw://item/field.path").unwrap_err();
 
         assert!(

@@ -12,6 +12,17 @@ env:
 jobs:
   lint-and-test:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        feature-set:
+          - name: all-features
+            flags: --all-features
+          - name: default-only
+            flags:
+          - name: minimal-backends
+            flags: --no-default-features --features env,file,keyring
+    name: lint-and-test (${{ matrix.feature-set.name }})
     steps:
       - uses: actions/checkout@v4
 
@@ -25,25 +36,30 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Check formatting
+        if: matrix.feature-set.name == 'all-features'
         run: cargo fmt --check
 
       - name: Build
-        run: cargo build --all-features
+        run: cargo build ${{ matrix.feature-set.flags }}
 
       - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --all-targets ${{ matrix.feature-set.flags }} -- -D warnings
 
       - name: Test
-        run: cargo test --all-features
+        run: cargo test ${{ matrix.feature-set.flags }}
 
       - name: Build docs
+        if: matrix.feature-set.name == 'all-features'
         run: cargo doc --no-deps
 
       - name: Deny check
+        if: matrix.feature-set.name == 'all-features'
         run: cargo deny check
 
       - name: Install mdbook
+        if: matrix.feature-set.name == 'all-features'
         run: cargo install mdbook
 
       - name: Build mdbook
+        if: matrix.feature-set.name == 'all-features'
         run: mdbook build docs

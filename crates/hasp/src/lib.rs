@@ -72,102 +72,71 @@ use std::sync::RwLock;
 use std::time::{Duration, Instant};
 use url::Url;
 
-/// Opaque handle to a backend instance.
-///
-/// All backends implement `hasp_core::Backend`. This wrapper provides
-/// cheap cloning (`Arc`) and dynamic dispatch so `Store` can hold
-/// heterogeneous backends in a single map.
-pub struct Backend(Arc<dyn hasp_core::Backend>);
+pub type Backend = Arc<dyn hasp_core::Backend>;
 
-impl Backend {
-    /// Wrap any type implementing `hasp_core::Backend`.
-    pub fn new<T>(inner: T) -> Self
-    where
-        T: hasp_core::Backend + 'static,
-    {
-        Self(Arc::new(inner))
-    }
-
-    #[cfg(feature = "aws-sm")]
-    pub fn aws_sm() -> Self {
-        Self::new(AwsSmBackend::new())
-    }
-
-    #[cfg(feature = "aws-ssm")]
-    pub fn aws_ssm() -> Self {
-        Self::new(AwsSsmBackend::new())
-    }
-
-    #[cfg(feature = "env")]
-    pub fn env() -> Self {
-        Self::new(EnvBackend)
-    }
-
-    #[cfg(feature = "file")]
-    pub fn file() -> Self {
-        Self::new(FileBackend)
-    }
-
-    #[cfg(feature = "keyring")]
-    pub fn keyring() -> Self {
-        Self::new(KeyringBackend::new())
-    }
-
-    #[cfg(feature = "op")]
-    pub fn op() -> Self {
-        Self::new(OpBackend::new())
-    }
-
-    #[cfg(feature = "vault")]
-    pub fn vault() -> Self {
-        Self::new(VaultBackend::new())
-    }
-
-    #[cfg(feature = "bw")]
-    pub fn bw() -> Self {
-        Self::new(BwBackend::new())
-    }
-
-    #[cfg(feature = "gcp-sm")]
-    pub fn gcp_sm() -> Self {
-        Self::new(GcpSmBackend::new())
-    }
-
-    #[cfg(feature = "azure-kv")]
-    pub fn azure_kv() -> Self {
-        Self::new(AzureKvBackend::new())
-    }
-
-    /// Wrap an externally-provided backend.
-    pub fn custom(inner: Arc<dyn hasp_core::Backend>) -> Self {
-        Self(inner)
-    }
+/// Wrap an externally-provided backend.
+pub fn custom_backend(inner: Arc<dyn hasp_core::Backend>) -> Backend {
+    inner
 }
 
-impl hasp_core::Backend for Backend {
-    fn scheme(&self) -> &'static str {
-        self.0.scheme()
-    }
+#[cfg(feature = "aws-sm")]
+/// Create an AWS Secrets Manager backend.
+pub fn aws_sm() -> Backend {
+    Arc::new(AwsSmBackend::new())
+}
 
-    fn get(&self, url: &Url) -> Result<SecretString, Error> {
-        self.0.get(url)
-    }
+#[cfg(feature = "aws-ssm")]
+/// Create an AWS SSM Parameter Store backend.
+pub fn aws_ssm() -> Backend {
+    Arc::new(AwsSsmBackend::new())
+}
 
-    fn put(&self, url: &Url, value: &SecretString) -> Result<(), Error> {
-        self.0.put(url, value)
-    }
+#[cfg(feature = "env")]
+/// Create an environment-variable backend.
+pub fn env() -> Backend {
+    Arc::new(EnvBackend)
+}
 
-    fn list(&self, url: &Url) -> Result<Vec<Entry>, Error> {
-        self.0.list(url)
-    }
+#[cfg(feature = "file")]
+/// Create a file backend.
+pub fn file() -> Backend {
+    Arc::new(FileBackend)
+}
 
-    fn delete(&self, url: &Url) -> Result<(), Error> {
-        self.0.delete(url)
-    }
+#[cfg(feature = "keyring")]
+/// Create an OS keyring backend.
+pub fn keyring() -> Backend {
+    Arc::new(KeyringBackend::new())
+}
 
-    fn exists(&self, url: &Url) -> Result<bool, Error> {
-        self.0.exists(url)
-    }
+#[cfg(feature = "op")]
+/// Create a 1Password CLI backend.
+pub fn op() -> Backend {
+    Arc::new(OpBackend::new())
+}
+
+#[cfg(feature = "vault")]
+/// Create a HashiCorp Vault backend.
+pub fn vault() -> Backend {
+    Arc::new(VaultBackend::new())
+}
+
+#[cfg(feature = "bw")]
+/// Create a Bitwarden CLI backend.
+pub fn bw() -> Backend {
+    Arc::new(BwBackend::new())
+}
+
+#[cfg(feature = "gcp-sm")]
+/// Create a GCP Secret Manager backend.
+pub fn gcp_sm() -> Backend {
+    Arc::new(GcpSmBackend::new())
+}
+
+#[cfg(feature = "azure-kv")]
+/// Create an Azure Key Vault backend.
+pub fn azure_kv() -> Backend {
+    Arc::new(AzureKvBackend::new())
 }
 
 /// Fluent builder for a [`Store`] with optional proxy configuration.
@@ -229,25 +198,25 @@ impl StoreBuilder {
 
         if self.defaults {
             #[cfg(feature = "aws-sm")]
-            store.register(Backend::new(AwsSmBackend::with_proxy(self.proxy.clone())));
+            store.register(Arc::new(AwsSmBackend::with_proxy(self.proxy.clone())));
             #[cfg(feature = "aws-ssm")]
-            store.register(Backend::new(AwsSsmBackend::with_proxy(self.proxy.clone())));
+            store.register(Arc::new(AwsSsmBackend::with_proxy(self.proxy.clone())));
             #[cfg(feature = "env")]
-            store.register(Backend::env());
+            store.register(crate::env());
             #[cfg(feature = "file")]
-            store.register(Backend::file());
+            store.register(crate::file());
             #[cfg(feature = "keyring")]
-            store.register(Backend::keyring());
+            store.register(crate::keyring());
             #[cfg(feature = "op")]
-            store.register(Backend::op());
+            store.register(crate::op());
             #[cfg(feature = "vault")]
-            store.register(Backend::new(VaultBackend::with_proxy(self.proxy.clone())));
+            store.register(Arc::new(VaultBackend::with_proxy(self.proxy.clone())));
             #[cfg(feature = "bw")]
-            store.register(Backend::bw());
+            store.register(crate::bw());
             #[cfg(feature = "gcp-sm")]
-            store.register(Backend::new(GcpSmBackend::with_proxy(self.proxy.clone())));
+            store.register(Arc::new(GcpSmBackend::with_proxy(self.proxy.clone())));
             #[cfg(feature = "azure-kv")]
-            store.register(Backend::new(AzureKvBackend::with_proxy(self.proxy.clone())));
+            store.register(Arc::new(AzureKvBackend::with_proxy(self.proxy.clone())));
         }
 
         for backend in self.extra_backends {
@@ -358,6 +327,34 @@ impl Store {
         }
 
         Ok(secret)
+    }
+
+    /// Resolve a URL to its backend without performing I/O.
+    ///
+    /// Returns the scheme, the backend's scheme name, and whether the
+    /// URL has a fresh cached entry (if TTL is enabled). Used by the
+    /// CLI for `--explain` / `--dry-run` diagnostics.
+    pub fn resolve(&self, url: &str) -> Result<(String, &'static str, bool), Error> {
+        let parsed_url = Url::parse(url)?;
+        let scheme = parsed_url.scheme().to_owned();
+        let backend = self
+            .backends
+            .get(parsed_url.scheme())
+            .ok_or_else(|| Error::UnknownScheme(scheme.clone()))?;
+
+        let cached = if let Some(ttl) = self.ttl {
+            if let Ok(cache) = self.cache.read() {
+                cache
+                    .get(url)
+                    .map_or(false, |entry| entry.fetched_at.elapsed() <= ttl)
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
+        Ok((scheme, backend.scheme(), cached))
     }
 
     /// Store a secret by URL.
