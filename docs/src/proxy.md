@@ -55,9 +55,9 @@ messages.
 
 | Backend | Explicit proxy (`--proxy-url`, profile) | Env vars (`HTTP_PROXY`, `NO_PROXY`) |
 |---|---|---|
-| `vault://` | ✅ via `reqwest::Proxy` | ✅ reqwest default |
-| `gcp-sm://` | ✅ via `reqwest::Proxy` | ✅ reqwest default |
-| `azure-kv://` | ✅ via `reqwest::Proxy` | ✅ reqwest default |
+| `vault://` | ✅ via `reqwest::Proxy` (HTTP CONNECT / SOCKS5) | ✅ reqwest default |
+| `gcp-sm://` | ✅ via `reqwest::Proxy` (HTTP CONNECT / SOCKS5) | ✅ reqwest default |
+| `azure-kv://` | ✅ via `reqwest::Proxy` (HTTP CONNECT / SOCKS5) | ✅ reqwest default |
 | `aws-sm://` | ⚠️ not yet; use env vars | ✅ AWS SDK default chain |
 | `aws-ssm://` | ⚠️ not yet; use env vars | ✅ AWS SDK default chain |
 | `op://` | N/A (delegates to `op` CLI) | N/A |
@@ -90,6 +90,15 @@ hasp get vault://vault.external.example.com/secret/data/db
 
 ## SOCKS5
 
-SOCKS5 is not implemented in this release. If your network requires it,
-use a local SOCKS5-to-HTTP-CONNECT adapter (e.g. `proxychains-ng` or a
-small `nc` wrapper) and point `hasp` at that.
+SOCKS5 proxies are supported for the same HTTP-based backends as HTTP
+CONNECT (`vault://`, `gcp-sm://`, `azure-kv://`). Pass the URL with a
+`socks5://` scheme:
+
+```bash
+hasp get --proxy-url socks5://127.0.0.1:1080 \
+  vault://secret/data/myapp/db-password
+```
+
+Only unauthenticated SOCKS5 is supported at this time. If your proxy
+requires username/password authentication, use a local forwarder or file
+a feature request.

@@ -111,13 +111,13 @@ let store = Store::with_defaults();
 
 // Custom subset, e.g. only env and file
 let store = Store::with_backends(vec![
-    hasp::Backend::Env(hasp::EnvBackend),
-    hasp::Backend::File(hasp::FileBackend),
+    hasp::env(),
+    hasp::file(),
 ]);
 
 // Empty store, then register backends manually
 let mut store = Store::empty();
-store.register(hasp::Backend::Env(hasp::EnvBackend));
+store.register(hasp::env());
 ```
 
 For one-off usage, free functions construct a default store internally:
@@ -131,6 +131,20 @@ hasp::exists("env://HOME")?;
 These match the sibling-crate `ferrule` convention and are thin wrappers
 over `Store::with_defaults()`. Heavy callers should cache a `Store`
 instance to avoid repeated backend construction.
+
+`hasp` also exposes bulk operations:
+
+```rust
+let values = store.batch_get(
+    &["env://A", "env://B", "env://A"]
+)?;
+// values.len() == 2 — deduplicated and resolved concurrently.
+
+store.bulk_put(&[
+    ("file:///tmp/a", &val_a),
+    ("file:///tmp/b", &val_b),
+])?;
+```
 
 Not every backend supports every operation. For example, `env://`
 does not support `put` (environment variables are read-only after

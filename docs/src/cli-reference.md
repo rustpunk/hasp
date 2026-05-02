@@ -14,6 +14,7 @@ Commands:
   list    List entries matching a URL prefix or alias
   delete  Delete a secret
   exists  Check whether a secret exists
+  init    Create a starter profiles.toml
   help    Print this message or the help of the given subcommand(s)
 
 Options:
@@ -33,6 +34,16 @@ hasp get @prod/db_password
 - **Exit code:** 0 on success, non-zero on error.
 - **Stdout:** The secret value, verbatim.
 - **Stderr:** Errors, hints, and warnings only.
+
+### `hasp get --explain <address>`
+
+Preview which backend will handle the address and whether the result
+is already cached, without actually fetching the secret.
+
+```bash
+hasp get --explain env://HOME
+# scheme=env backend=env cached=false
+```
 
 ## `hasp put <address> [<value>]`
 
@@ -90,6 +101,19 @@ hasp exists env://HOME && echo "present" || echo "missing"
 ```
 
 - **Exit code:** 0 if present, 1 if absent, non-zero on error.
+
+## `hasp init`
+
+Create a starter `profiles.toml` in the platform config directory.
+
+```bash
+hasp init
+# Refuse to overwrite an existing file:
+hasp init --force
+```
+
+- **Exit code:** 0 on success, non-zero if the file already exists and `--force` was not given.
+- **Respects** `HASP_PROFILES_PATH` if set.
 
 ## `hasp complete <shell>`
 

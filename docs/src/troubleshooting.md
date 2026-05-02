@@ -51,6 +51,12 @@
 - `env://` is read-only. Set the variable through your shell before
   invoking hasp.
 
+### `hasp init` says the file already exists
+
+- `hasp init` refuses to overwrite an existing `profiles.toml` to
+  prevent accidental data loss.
+- Use `hasp init --force` to overwrite, or delete the file first.
+
 ### `does not support list`
 
 - `env://` and `file://` do not support `list`. Use `list` with
