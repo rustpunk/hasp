@@ -172,6 +172,40 @@ URL.
 See [Troubleshooting](troubleshooting.md) for the most common
 scenarios.
 
+## Retry decorator
+
+For HTTP-backed stores (`aws-sm`, `aws-ssm`, `vault`, `gcp-sm`,
+`azure-kv`) you can opt into automatic retry on transient failures:
+
+```rust
+use hasp::StoreBuilder;
+use std::time::Duration;
+
+let store = StoreBuilder::with_defaults()
+    .with_retry(3, Duration::from_millis(100))
+    .build();
+```
+
+The decorator wraps each HTTP backend with exponential backoff plus
+jitter. Local backends (`env`, `file`, `keyring`, `op`, `bw`) are
+never wrapped — their errors are not transient.
+
+## Diagnostics
+
+`Store::resolve` inspects a URL without performing I/O, returning the
+scheme, the chosen backend name, and whether the entry is still in
+the TTL cache. This powers the CLI `--explain` flag:
+
+```text
+$ hasp --explain get env://HOME
+URL:      env://HOME
+Backend:  env
+Cache:    miss
+```
+
+Use it to debug alias expansion, proxy routing, or cache state before
+running a destructive command.
+
 ## Where to next
 
 - [Profile Aliases](profiles.md) — alias resolution rules, config

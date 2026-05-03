@@ -33,7 +33,7 @@
 
 pub use hasp_core::{
     scheme_from_url, Backend as BackendTrait, BackendFailureKind, Entry, Error, ExposeSecret,
-    ProxyConfig, SecretString,
+    ProxyConfig, RetryBackend, SecretString,
 };
 
 #[cfg(feature = "aws-sm")]
@@ -149,6 +149,7 @@ pub struct StoreBuilder {
     defaults: bool,
     extra_backends: Vec<Backend>,
     ttl: Option<Duration>,
+    retry: Option<(u32, Duration)>,
 }
 
 impl StoreBuilder {
@@ -159,6 +160,7 @@ impl StoreBuilder {
             defaults: false,
             extra_backends: Vec::new(),
             ttl: None,
+            retry: None,
         }
     }
 
@@ -170,6 +172,7 @@ impl StoreBuilder {
             defaults: true,
             extra_backends: Vec::new(),
             ttl: None,
+            retry: None,
         }
     }
 
@@ -191,13 +194,24 @@ impl StoreBuilder {
         self
     }
 
+    /// Enable retry with exponential backoff for transient failures.
+    ///
+    /// When set, every default backend that communicates over HTTP will
+    /// be wrapped in a [`RetryBackend`] with the given max retries and
+    /// base delay. Local backends (`env`, `file`, `keyring`, `op`, `bw`)
+    /// are never wrapped — their errors are not transient.
+    pub fn with_retry(mut self, max_retries: u32, base_delay: Duration) -> Self {
+        self.retry = Some((max_retries, base_delay));
+        self
+    }
+
     /// Build the final [`Store`].
     pub fn build(self) -> Store {
         let mut store = Store::empty();
         store.ttl = self.ttl;
 
         if self.defaults {
-            register_default_backends(&mut store, &self.proxy);
+            register_default_backends(&mut store, &self.proxy, self.retry);
         }
 
         for backend in self.extra_backends {
@@ -220,11 +234,23 @@ impl Default for StoreBuilder {
 /// included in the final binary. Proxy configuration is passed to
 /// backends that support HTTP CONNECT/SOCKS5 proxies.
 #[allow(unused_variables)]
-fn register_default_backends(store: &mut Store, proxy: &Option<ProxyConfig>) {
+fn register_default_backends(
+    store: &mut Store,
+    proxy: &Option<ProxyConfig>,
+    retry: Option<(u32, Duration)>,
+) {
+    let wrap = |b: Backend| {
+        if let Some((max, delay)) = retry {
+            Arc::new(RetryBackend::new(b).max_retries(max).base_delay(delay)) as Backend
+        } else {
+            b
+        }
+    };
+
     #[cfg(feature = "aws-sm")]
-    store.register(Arc::new(AwsSmBackend::with_proxy(proxy.clone())));
+    store.register(wrap(Arc::new(AwsSmBackend::with_proxy(proxy.clone()))));
     #[cfg(feature = "aws-ssm")]
-    store.register(Arc::new(AwsSsmBackend::with_proxy(proxy.clone())));
+    store.register(wrap(Arc::new(AwsSsmBackend::with_proxy(proxy.clone()))));
     #[cfg(feature = "env")]
     store.register(crate::env());
     #[cfg(feature = "file")]
@@ -234,13 +260,13 @@ fn register_default_backends(store: &mut Store, proxy: &Option<ProxyConfig>) {
     #[cfg(feature = "op")]
     store.register(crate::op());
     #[cfg(feature = "vault")]
-    store.register(Arc::new(VaultBackend::with_proxy(proxy.clone())));
+    store.register(wrap(Arc::new(VaultBackend::with_proxy(proxy.clone()))));
     #[cfg(feature = "bw")]
     store.register(crate::bw());
     #[cfg(feature = "gcp-sm")]
-    store.register(Arc::new(GcpSmBackend::with_proxy(proxy.clone())));
+    store.register(wrap(Arc::new(GcpSmBackend::with_proxy(proxy.clone()))));
     #[cfg(feature = "azure-kv")]
-    store.register(Arc::new(AzureKvBackend::with_proxy(proxy.clone())));
+    store.register(wrap(Arc::new(AzureKvBackend::with_proxy(proxy.clone()))));
 }
 
 struct CacheEntry {
