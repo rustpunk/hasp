@@ -252,16 +252,28 @@ fn run(cli: Cli) -> Result<(), String> {
             // copy is a credible MITM vector. cp doubles the exposure
             // window relative to a back-to-back get+put, so refuse
             // unless the caller has explicitly opted in.
-            if let Ok(p) = std::env::var("HTTPS_PROXY")
-                .or_else(|_| std::env::var("https_proxy"))
-                .or_else(|_| std::env::var("HTTP_PROXY"))
-                .or_else(|_| std::env::var("http_proxy"))
-            {
-                if p.starts_with("http://") && std::env::var_os("HASP_ALLOW_HTTP_PROXY").is_none() {
-                    return Err(format!(
-                        "refusing hasp cp through a plain-http proxy ({p}); \
-                         set HASP_ALLOW_HTTP_PROXY=1 to override"
-                    ));
+            // Mirror the full reqwest / AWS-SDK fallback set: HTTPS_PROXY,
+            // HTTP_PROXY, and ALL_PROXY (each in both case-conventions).
+            // Missing any one of these would let a user with the alternate
+            // variable set bypass the cp refusal.
+            const PROXY_ENV_VARS: &[&str] = &[
+                "HTTPS_PROXY",
+                "https_proxy",
+                "HTTP_PROXY",
+                "http_proxy",
+                "ALL_PROXY",
+                "all_proxy",
+            ];
+            for var in PROXY_ENV_VARS {
+                if let Ok(p) = std::env::var(var) {
+                    if p.starts_with("http://")
+                        && std::env::var_os("HASP_ALLOW_HTTP_PROXY").is_none()
+                    {
+                        return Err(format!(
+                            "refusing hasp cp through a plain-http proxy ({p} via {var}); \
+                             set HASP_ALLOW_HTTP_PROXY=1 to override"
+                        ));
+                    }
                 }
             }
             if let Some(p) = &cli.proxy_url {

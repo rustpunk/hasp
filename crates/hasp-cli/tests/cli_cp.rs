@@ -329,6 +329,54 @@ fn cp_plain_http_proxy_refused() {
 }
 
 #[test]
+fn cp_plain_http_all_proxy_refused() {
+    // ALL_PROXY and all_proxy are honored by reqwest / the AWS SDK
+    // as fallbacks. The cp refusal must cover them too — otherwise
+    // a user with only ALL_PROXY set bypasses the gate.
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("src.txt");
+    let dst = dir.path().join("dst.txt");
+    write(&src, "v");
+
+    let output = hasp()
+        .env("ALL_PROXY", "http://attacker.example:8080")
+        .args(["cp", &file_url(&src), &file_url(&dst)])
+        .output()
+        .unwrap();
+    assert!(
+        !output.status.success(),
+        "plain-http ALL_PROXY must refuse cp"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("ALL_PROXY"),
+        "refusal should name the offending var: {stderr}"
+    );
+    assert!(
+        !dst.exists(),
+        "dst must not be created when proxy refusal triggers"
+    );
+}
+
+#[test]
+fn cp_plain_http_lowercase_all_proxy_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("src.txt");
+    let dst = dir.path().join("dst.txt");
+    write(&src, "v");
+
+    let output = hasp()
+        .env("all_proxy", "http://attacker.example:8080")
+        .args(["cp", &file_url(&src), &file_url(&dst)])
+        .output()
+        .unwrap();
+    assert!(
+        !output.status.success(),
+        "plain-http all_proxy must refuse cp"
+    );
+}
+
+#[test]
 fn cp_plain_http_proxy_allowed_with_override() {
     let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("src.txt");

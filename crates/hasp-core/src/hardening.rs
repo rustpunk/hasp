@@ -346,14 +346,15 @@ mod tests {
         let _ = outcomes;
     }
 
+    // Tests in this module mutate process-wide environment variables.
+    // Serialize them with the shared ENV_LOCK so parallel test threads
+    // can't observe each other's transient state.
+    use crate::test_utils::ENV_LOCK;
+
     #[test]
     fn check_refusal_rejects_ld_preload() {
-        // Use a unique key path to avoid touching shared state.
-        // SAFETY: tests are not run concurrently in the same process
-        // when using `cargo test -- --test-threads=1`. With default
-        // threading the env-mutation is racy; we accept the chance of
-        // false negatives because the assertion is on the value path
-        // we just set.
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: serialized by ENV_LOCK; we restore on the way out.
         unsafe { std::env::set_var("LD_PRELOAD", "/tmp/nonexistent.so") };
         let result = check_refusal_conditions();
         unsafe { std::env::remove_var("LD_PRELOAD") };
@@ -365,6 +366,8 @@ mod tests {
 
     #[test]
     fn check_refusal_rejects_dyld_insert_libraries() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: serialized by ENV_LOCK; we restore on the way out.
         unsafe { std::env::set_var("DYLD_INSERT_LIBRARIES", "/tmp/x.dylib") };
         let result = check_refusal_conditions();
         unsafe { std::env::remove_var("DYLD_INSERT_LIBRARIES") };
