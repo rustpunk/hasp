@@ -67,6 +67,16 @@ impl Profiles {
     pub fn proxy_url(&self, profile_name: &str) -> Option<String> {
         self.inner.get(profile_name)?.get("proxy_url").cloned()
     }
+
+    /// Return the `environment` label for a named profile, if set.
+    ///
+    /// Used by `hasp cp` to refuse cross-environment writes (e.g.
+    /// `prod` → `stage`) without explicit `--yes`. The label is opaque
+    /// — any non-empty string — so users can pick their own naming
+    /// conventions.
+    pub fn environment(&self, profile_name: &str) -> Option<String> {
+        self.inner.get(profile_name)?.get("environment").cloned()
+    }
 }
 
 /// Load profiles from the config file path.
@@ -107,16 +117,29 @@ pub fn load_profiles() -> Result<Profiles, Box<dyn std::error::Error>> {
     let mut inner: HashMap<String, HashMap<String, String>> = HashMap::new();
     for (profile_name, map) in raw.profiles {
         let mut validated = HashMap::new();
-        for (key, url_str) in map {
-            if key == "proxy_url" {
-                hasp_core::ProxyConfig::parse(&url_str).map_err(|e| {
-                    format!("invalid proxy_url in profile '{profile_name}.{key}': {e}")
-                })?;
-            } else {
-                url::Url::parse(&url_str)
-                    .map_err(|e| format!("invalid URL in profile '{profile_name}.{key}': {e}"))?;
+        for (key, value) in map {
+            match key.as_str() {
+                "proxy_url" => {
+                    hasp_core::ProxyConfig::parse(&value).map_err(|e| {
+                        format!("invalid proxy_url in profile '{profile_name}.{key}': {e}")
+                    })?;
+                }
+                "environment" => {
+                    // Opaque label, no validation beyond non-empty.
+                    if value.trim().is_empty() {
+                        return Err(format!(
+                            "invalid environment in profile '{profile_name}': must be non-empty"
+                        )
+                        .into());
+                    }
+                }
+                _ => {
+                    url::Url::parse(&value).map_err(|e| {
+                        format!("invalid URL in profile '{profile_name}.{key}': {e}")
+                    })?;
+                }
             }
-            validated.insert(key, url_str);
+            validated.insert(key, value);
         }
         inner.insert(profile_name, validated);
     }

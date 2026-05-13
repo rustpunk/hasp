@@ -1,4 +1,4 @@
-use clap::{ArgAction, CommandFactory, Parser, Subcommand, ValueHint};
+use clap::{ArgAction, CommandFactory, Parser, Subcommand, ValueEnum, ValueHint};
 use clap_complete::engine::ArgValueCompleter;
 use secrecy::ExposeSecret;
 use std::io::{self, IsTerminal, Read, Write};
@@ -74,6 +74,33 @@ enum Command {
         #[arg(value_hint = ValueHint::AnyPath, add = ArgValueCompleter::new(completions::complete_address))]
         address: String,
     },
+    /// Copy a secret from one URL or alias to another.
+    ///
+    /// `cp` reads from `src` and writes to `dst`. It is the only verb
+    /// that holds plaintext in memory across two backends in one
+    /// invocation, so the security model is documented at
+    /// `docs/src/cli-reference.md#cp` — read it before scripting
+    /// production migrations.
+    Cp {
+        /// Source URL or alias (`@profile/key`).
+        #[arg(value_hint = ValueHint::AnyPath, add = ArgValueCompleter::new(completions::complete_address))]
+        src: String,
+        /// Destination URL or alias (`@profile/key`).
+        #[arg(value_hint = ValueHint::AnyPath, add = ArgValueCompleter::new(completions::complete_address))]
+        dst: String,
+        /// Behavior when destination already holds a value.
+        #[arg(long, value_enum, default_value = "fail")]
+        if_exists: CliIfExists,
+        /// Shorthand for `--if-exists=overwrite`.
+        #[arg(short, long)]
+        force: bool,
+        /// Re-read destination after writing and constant-time compare.
+        #[arg(long)]
+        verify: bool,
+        /// Confirm cross-environment writes (e.g., prod → stage).
+        #[arg(short, long)]
+        yes: bool,
+    },
     /// Initialize a default `profiles.toml` in the platform config dir.
     Init {
         /// Overwrite existing config file.
@@ -96,8 +123,40 @@ enum Command {
     },
 }
 
+/// CLI mirror of `hasp::IfExists`.
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum CliIfExists {
+    /// Refuse to clobber an existing destination (default).
+    Fail,
+    /// Write over the destination unconditionally.
+    Overwrite,
+    /// No-op when the destination already has a value.
+    Skip,
+}
+
+impl CliIfExists {
+    fn into_lib(self) -> hasp::IfExists {
+        match self {
+            CliIfExists::Fail => hasp::IfExists::Fail,
+            CliIfExists::Overwrite => hasp::IfExists::Overwrite,
+            CliIfExists::Skip => hasp::IfExists::Skip,
+        }
+    }
+}
+
 fn main() {
     clap_complete::CompleteEnv::with_factory(Cli::command).complete();
+
+    // Process-hardening runs before any secret-handling code. Refuses
+    // on injection-style env vars (LD_PRELOAD, DYLD_INSERT_LIBRARIES,
+    // …) and setuid configurations; applies best-effort platform
+    // mitigations (PR_SET_DUMPABLE, WER suppression, mitigation
+    // policies, dll search-order). Outcomes are silently discarded
+    // here — a future `--verbose-hardening` flag could surface them.
+    if let Err(e) = hasp::harden_process() {
+        eprintln!("hasp: {e}");
+        std::process::exit(1);
+    }
 
     let cli = Cli::parse();
 
@@ -119,7 +178,9 @@ fn run(cli: Cli) -> Result<(), String> {
     let proxy = resolve_proxy(&cli, &profiles)?;
     let store = hasp::StoreBuilder::with_defaults().proxy(proxy).build();
 
-    if cli.explain {
+    // `cp` consumes `--explain` itself by mapping it to `dry_run`
+    // because both src and dst need resolving — handled in the Cp arm.
+    if cli.explain && !matches!(cli.command, Command::Cp { .. }) {
         let address = command_address(&cli);
         if let Some(addr) = address {
             let url = resolve(addr, &profiles)?;
@@ -175,6 +236,121 @@ fn run(cli: Cli) -> Result<(), String> {
             let url = resolve(&address, &profiles)?;
             let exists = store.exists(&url).map_err(fmt_error)?;
             std::process::exit(if exists { 0 } else { 1 });
+        }
+        Command::Cp {
+            src,
+            dst,
+            if_exists,
+            force,
+            verify,
+            yes,
+        } => {
+            let src_url = resolve(&src, &profiles)?;
+            let dst_url = resolve(&dst, &profiles)?;
+
+            // Proxy hygiene: a plain-http proxy in front of a secret
+            // copy is a credible MITM vector. cp doubles the exposure
+            // window relative to a back-to-back get+put, so refuse
+            // unless the caller has explicitly opted in.
+            if let Ok(p) = std::env::var("HTTPS_PROXY")
+                .or_else(|_| std::env::var("https_proxy"))
+                .or_else(|_| std::env::var("HTTP_PROXY"))
+                .or_else(|_| std::env::var("http_proxy"))
+            {
+                if p.starts_with("http://") && std::env::var_os("HASP_ALLOW_HTTP_PROXY").is_none() {
+                    return Err(format!(
+                        "refusing hasp cp through a plain-http proxy ({p}); \
+                         set HASP_ALLOW_HTTP_PROXY=1 to override"
+                    ));
+                }
+            }
+            if let Some(p) = &cli.proxy_url {
+                if p.starts_with("http://") && std::env::var_os("HASP_ALLOW_HTTP_PROXY").is_none() {
+                    return Err(format!(
+                        "refusing hasp cp through a plain-http proxy ({p}); \
+                         set HASP_ALLOW_HTTP_PROXY=1 to override"
+                    ));
+                }
+            }
+
+            // Cross-environment refusal: when both src and dst are
+            // alias-prefixed and their profiles carry an `environment`
+            // label, refuse a mismatch without --yes. Absent labels
+            // mean no extra check — backwards-compatible for users
+            // who haven't adopted the labeling convention.
+            if !yes {
+                if let (Some(s_env), Some(d_env)) = (
+                    profile_environment(&src, &profiles),
+                    profile_environment(&dst, &profiles),
+                ) {
+                    if s_env != d_env {
+                        return Err(format!(
+                            "refusing cross-environment copy: src='{s_env}' dst='{d_env}'; \
+                             pass --yes to confirm"
+                        ));
+                    }
+                }
+            }
+
+            let resolved_if_exists = if force {
+                hasp::IfExists::Overwrite
+            } else {
+                if_exists.into_lib()
+            };
+            let dry_run = cli.explain;
+            let opts = hasp::CopyOptions {
+                if_exists: resolved_if_exists,
+                dry_run,
+                verify,
+            };
+
+            // Audit-event stream to stderr (one line JSON, no values
+            // and no lengths). Strongly redacted: only URL scheme,
+            // outcome, and error kind are emitted.
+            let src_scheme = scheme_of(&src_url);
+            let dst_scheme = scheme_of(&dst_url);
+            emit_audit("cp.start", &src_scheme, &dst_scheme, "started", None);
+
+            if dry_run && !cli.quiet {
+                eprintln!("URL (src):   {src_url}");
+                eprintln!("URL (dst):   {dst_url}");
+                eprintln!("Backend src: {src_scheme}");
+                eprintln!("Backend dst: {dst_scheme}");
+                eprintln!(
+                    "Operation:   cp (dry-run; no read, no write){}",
+                    if verify { " verify=true" } else { "" }
+                );
+            }
+
+            let outcome_result = store.copy(&src_url, &dst_url, opts);
+            match &outcome_result {
+                Ok(o) => {
+                    emit_audit(
+                        "cp.done",
+                        &src_scheme,
+                        &dst_scheme,
+                        if dry_run {
+                            "dry_run"
+                        } else if o.copied {
+                            "copied"
+                        } else {
+                            "skipped"
+                        },
+                        None,
+                    );
+                    if cli.verbose > 0 && !cli.quiet {
+                        eprintln!(
+                            "hasp: cp {} -> {} (copied={}, verified={})",
+                            src, dst, o.copied, o.verified
+                        );
+                    }
+                }
+                Err(e) => {
+                    let kind = error_kind(e);
+                    emit_audit("cp.done", &src_scheme, &dst_scheme, "error", Some(kind));
+                }
+            }
+            outcome_result.map_err(fmt_error)?;
         }
         Command::Init { force } => {
             config_init::init(force)?;
@@ -250,6 +426,9 @@ fn resolve_proxy(
 }
 
 /// Extract the primary address argument from the current CLI command.
+///
+/// Returns `None` for `cp` because `cp` has two addresses and handles
+/// `--explain` inside its own arm rather than the shared early branch.
 fn command_address(cli: &Cli) -> Option<&str> {
     match &cli.command {
         Command::Get { address }
@@ -257,7 +436,7 @@ fn command_address(cli: &Cli) -> Option<&str> {
         | Command::List { address, .. }
         | Command::Delete { address }
         | Command::Exists { address } => Some(address.as_str()),
-        Command::Init { .. } | Command::Man | Command::Complete { .. } => None,
+        Command::Cp { .. } | Command::Init { .. } | Command::Man | Command::Complete { .. } => None,
     }
 }
 
@@ -269,6 +448,7 @@ fn command_verb(cli: &Cli) -> &'static str {
         Command::List { .. } => "list",
         Command::Delete { .. } => "delete",
         Command::Exists { .. } => "exists",
+        Command::Cp { .. } => "cp",
         Command::Init { .. } => "init",
         Command::Man => "man",
         Command::Complete { .. } => "complete",
@@ -284,7 +464,79 @@ fn command_addresses(cli: &Cli) -> Vec<&str> {
         Command::List { address, .. } => vec![address.as_str()],
         Command::Delete { address } => vec![address.as_str()],
         Command::Exists { address } => vec![address.as_str()],
+        Command::Cp { src, dst, .. } => vec![src.as_str(), dst.as_str()],
         Command::Init { .. } | Command::Man | Command::Complete { .. } => vec![],
+    }
+}
+
+/// Extract the URL scheme of a resolved URL string.
+fn scheme_of(url: &str) -> String {
+    url.split_once("://")
+        .map(|(s, _)| s.to_owned())
+        .unwrap_or_else(|| url.to_owned())
+}
+
+/// Look up the `environment` label for the profile referenced by an
+/// alias of the form `@<profile>[/key]`. Plain URLs return `None`.
+fn profile_environment(address: &str, profiles: &profiles::Profiles) -> Option<String> {
+    let rest = address.strip_prefix('@')?;
+    let profile_name = rest.split_once('/').map(|(p, _)| p).unwrap_or(rest);
+    profiles.environment(profile_name)
+}
+
+/// Emit a single-line JSON audit event to stderr.
+///
+/// The record never includes secret values, byte lengths, or any
+/// derived material — only schemes, outcome label, and (optionally)
+/// an error-kind classifier. Downstream SIEMs can ingest the stream
+/// without value-leak risk.
+fn emit_audit(
+    event: &str,
+    src_scheme: &str,
+    dst_scheme: &str,
+    outcome: &str,
+    error_kind: Option<&'static str>,
+) {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let mut obj = serde_json::Map::new();
+    obj.insert("event".into(), serde_json::Value::String(event.into()));
+    obj.insert("ts".into(), serde_json::Value::Number(ts.into()));
+    obj.insert(
+        "src_scheme".into(),
+        serde_json::Value::String(src_scheme.into()),
+    );
+    obj.insert(
+        "dst_scheme".into(),
+        serde_json::Value::String(dst_scheme.into()),
+    );
+    obj.insert("outcome".into(), serde_json::Value::String(outcome.into()));
+    if let Some(k) = error_kind {
+        obj.insert("error_kind".into(), serde_json::Value::String(k.into()));
+    }
+    if let Ok(line) = serde_json::to_string(&serde_json::Value::Object(obj)) {
+        let _ = writeln!(io::stderr(), "{line}");
+    }
+}
+
+/// Stable classifier for `hasp::Error` variants. Used in audit events
+/// so consumers can pattern-match on the kind without parsing the
+/// human-readable message.
+fn error_kind(err: &hasp::Error) -> &'static str {
+    match err {
+        hasp::Error::UrlParse(_) => "url_parse",
+        hasp::Error::InvalidUrl(_) => "invalid_url",
+        hasp::Error::UnknownScheme(_) => "unknown_scheme",
+        hasp::Error::UnsupportedOperation { .. } => "unsupported_operation",
+        hasp::Error::NotFound(_) => "not_found",
+        hasp::Error::PermissionDenied(_) => "permission_denied",
+        hasp::Error::AuthenticationFailed(_) => "auth_failed",
+        hasp::Error::PreconditionFailed(_) => "precondition_failed",
+        hasp::Error::Backend { .. } => "backend",
+        _ => "other",
     }
 }
 
