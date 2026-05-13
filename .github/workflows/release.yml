@@ -45,6 +45,12 @@ jobs:
           key: ${{ matrix.target }}
 
       - name: Build
+        # Windows builds enable Control Flow Guard for the release
+        # binary. CFG adds compiler-inserted indirect-call checks
+        # and is one of the cheap exploit-mitigation wins
+        # documented in the rustc Exploit Mitigations chapter.
+        env:
+          RUSTFLAGS: ${{ matrix.os == 'windows-latest' && '-C control-flow-guard=yes' || '' }}
         run: cargo build --release --bin hasp --target ${{ matrix.target }}
 
       - name: Package (unix)
