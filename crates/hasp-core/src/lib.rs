@@ -6,6 +6,7 @@
 //! those live in `hasp-cli`.
 
 pub mod error;
+pub mod hardening;
 pub mod proxy;
 pub mod retry;
 
@@ -13,9 +14,13 @@ pub mod retry;
 pub mod test_utils;
 
 pub use error::{BackendFailureKind, Error};
+pub use hardening::{
+    apply_mitigations, check_refusal_conditions, harden_process, HardenRefusal, MitigationOutcome,
+};
 pub use proxy::{is_no_proxy, resolve_proxy_from_env, ProxyConfig};
 pub use retry::RetryBackend;
 pub use secrecy::{ExposeSecret, SecretString};
+pub use subtle;
 
 use url::Url;
 

@@ -32,8 +32,9 @@
 //! output never leaks secret values.
 
 pub use hasp_core::{
-    scheme_from_url, Backend as BackendTrait, BackendFailureKind, Entry, Error, ExposeSecret,
-    ProxyConfig, RetryBackend, SecretString,
+    apply_mitigations, check_refusal_conditions, harden_process, scheme_from_url,
+    Backend as BackendTrait, BackendFailureKind, Entry, Error, ExposeSecret, HardenRefusal,
+    MitigationOutcome, ProxyConfig, RetryBackend, SecretString,
 };
 
 #[cfg(feature = "aws-sm")]
@@ -552,15 +553,161 @@ impl Store {
     /// let results = store.bulk_put(&items);
     /// ```
     pub fn bulk_put(&self, items: &[(&str, &SecretString)]) -> Vec<Result<(), Error>> {
+        // `put` already invalidates the cache entry on success.
         items
             .iter()
-            .map(|(url, value)| {
-                let result = self.put(url, value);
-                // Cache invalidation is already handled by `put`.
-                result
-            })
+            .map(|(url, value)| self.put(url, value))
             .collect()
     }
+
+    /// Copy a secret from one backend to another.
+    ///
+    /// `cp` is the only verb that reads *and* writes a secret in a
+    /// single invocation, which widens the in-process exposure window
+    /// relative to a back-to-back `get` + `put`. The implementation
+    /// keeps the value in `SecretString` end-to-end and drops both the
+    /// fetched and (optionally) verified copies as soon as the
+    /// operation completes.
+    ///
+    /// # Behavior
+    ///
+    /// 1. Refuses when source and destination URLs are identical
+    ///    (avoids version-counter inflation on backends that version
+    ///    writes).
+    /// 2. With `dry_run`, resolves both URLs and returns
+    ///    `Ok(CopyOutcome { copied: false, .. })` without calling
+    ///    `get` or `put`.
+    /// 3. Honors `IfExists`: `Fail` returns `PreconditionFailed` when
+    ///    the destination already has a value; `Skip` returns
+    ///    `Ok(CopyOutcome { copied: false, .. })`; `Overwrite` writes
+    ///    unconditionally.
+    /// 4. With `verify`, re-reads the destination after the put and
+    ///    constant-time compares it against the source value. A
+    ///    mismatch yields `PreconditionFailed` with a generic message
+    ///    (no byte-level diff).
+    ///
+    /// # Errors
+    ///
+    /// Propagates the backend's errors for `get` / `put` / `exists`.
+    /// Returns `Error::UnsupportedOperation` when the destination
+    /// backend does not implement `put`.
+    pub fn copy(&self, src: &str, dst: &str, opts: CopyOptions) -> Result<CopyOutcome, Error> {
+        let src_url = Url::parse(src)?;
+        let dst_url = Url::parse(dst)?;
+        if src_url.as_str() == dst_url.as_str() {
+            return Err(Error::InvalidUrl(
+                "source and destination are identical".into(),
+            ));
+        }
+
+        // Resolve both backends up front so dry-run can report the plan.
+        let src_scheme = src_url.scheme();
+        let dst_scheme = dst_url.scheme();
+        let _src_backend = self
+            .backends
+            .get(src_scheme)
+            .ok_or_else(|| Error::UnknownScheme(src_scheme.to_owned()))?;
+        let _dst_backend = self
+            .backends
+            .get(dst_scheme)
+            .ok_or_else(|| Error::UnknownScheme(dst_scheme.to_owned()))?;
+
+        if opts.dry_run {
+            return Ok(CopyOutcome {
+                copied: false,
+                verified: false,
+            });
+        }
+
+        if !matches!(opts.if_exists, IfExists::Overwrite) {
+            match self.exists(dst) {
+                Ok(true) => match opts.if_exists {
+                    IfExists::Fail => {
+                        return Err(Error::PreconditionFailed(format!(
+                            "destination {dst} already has a value; pass --force or \
+                             --if-exists=overwrite to clobber, or --if-exists=skip to no-op"
+                        )));
+                    }
+                    IfExists::Skip => {
+                        return Ok(CopyOutcome {
+                            copied: false,
+                            verified: false,
+                        });
+                    }
+                    IfExists::Overwrite => unreachable!(),
+                },
+                Ok(false) => {}
+                // exists() not implemented on dst — proceed.
+                // The subsequent put will still surface a real error
+                // if it conflicts at the backend layer.
+                Err(Error::UnsupportedOperation { .. }) => {}
+                Err(e) => return Err(e),
+            }
+        }
+
+        let secret = self.get(src)?;
+        self.put(dst, &secret)?;
+
+        let verified = if opts.verify {
+            let readback = self.get(dst)?;
+            let a = secret.expose_secret().as_bytes();
+            let b = readback.expose_secret().as_bytes();
+            use hasp_core::subtle::ConstantTimeEq;
+            if a.len() != b.len() || a.ct_eq(b).unwrap_u8() == 0 {
+                return Err(Error::PreconditionFailed(
+                    "verify failed: source and destination differ after copy".into(),
+                ));
+            }
+            true
+        } else {
+            false
+        };
+
+        Ok(CopyOutcome {
+            copied: true,
+            verified,
+        })
+    }
+}
+
+/// What to do when the destination of a `copy` already holds a value.
+///
+/// Default is `Fail`: secrets are valuable and silent clobbering is a
+/// worse outcome than a non-zero exit demanding `--force`. This
+/// deliberately departs from Unix `cp`'s overwrite-by-default.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum IfExists {
+    /// Return `PreconditionFailed` when the destination is occupied.
+    #[default]
+    Fail,
+    /// Write the source value over the destination unconditionally.
+    Overwrite,
+    /// Return `Ok(CopyOutcome { copied: false, .. })` and leave the
+    /// destination untouched.
+    Skip,
+}
+
+/// Options for [`Store::copy`].
+#[derive(Debug, Clone, Default)]
+pub struct CopyOptions {
+    /// Disposition when the destination already holds a value.
+    pub if_exists: IfExists,
+    /// Resolve both URLs and return without reading or writing.
+    pub dry_run: bool,
+    /// Re-read the destination after writing and constant-time compare
+    /// against the source value.
+    pub verify: bool,
+}
+
+/// Outcome of a successful `copy`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CopyOutcome {
+    /// True when a `put` actually executed against the destination.
+    /// False for `dry_run` and for `IfExists::Skip` when the
+    /// destination already had a value.
+    pub copied: bool,
+    /// True only when `opts.verify` was set and the readback matched.
+    pub verified: bool,
 }
 
 use std::sync::OnceLock;

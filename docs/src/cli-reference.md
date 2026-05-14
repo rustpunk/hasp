@@ -14,6 +14,7 @@ Commands:
   list    List entries matching a URL prefix or alias
   delete  Delete a secret
   exists  Check whether a secret exists
+  cp      Copy a secret from one URL or alias to another
   init    Create a starter profiles.toml
   help    Print this message or the help of the given subcommand(s)
 
@@ -102,6 +103,79 @@ hasp exists env://HOME && echo "present" || echo "missing"
 
 - **Exit code:** 0 if present, 1 if absent, non-zero on error.
 
+## `hasp cp <src> <dst>`
+
+Copy a secret from one backend to another. `cp` is the only verb that
+reads and writes a secret in a single invocation, so its security
+model is documented inline below — read it before scripting production
+migrations.
+
+```bash
+hasp cp file:///tmp/old.txt file:///tmp/new.txt
+hasp cp env://OLD_NAME file:///etc/secrets/new
+hasp cp @stage/db @prod/db --yes --verify
+hasp cp --explain @stage/db @prod/db          # dry-run; resolves both
+                                              # backends, prints plan,
+                                              # does not read or write
+```
+
+- **Arguments:**
+  - `src` — Source URL or alias. Backend must support `get`.
+  - `dst` — Destination URL or alias. Backend must support `put`.
+- **Flags:**
+  - `--if-exists <fail|overwrite|skip>` — Disposition when `dst`
+    already holds a value. Default `fail`.
+  - `-f, --force` — Shorthand for `--if-exists=overwrite`.
+  - `--verify` — Re-read `dst` after writing and constant-time compare
+    against the source. Mismatch returns a precondition-failed exit
+    with no byte-level information.
+  - `-y, --yes` — Confirm a cross-environment copy (see "Security
+    model" below).
+  - `--explain` (global) — Treated as dry-run for `cp`: resolves both
+    URLs and prints the plan; does not call `get` or `put`.
+- **Exit code:** 0 on success, non-zero on refusal, error, or
+  precondition failure.
+
+### Security model
+
+The defaults are deliberately stricter than Unix `cp`:
+
+1. **`--if-exists=fail` is the default.** Silent clobbering of a
+   production secret with a staging value is materially worse than a
+   non-zero exit demanding `--force`. Pass `--force` (or
+   `--if-exists=overwrite`) to opt in.
+2. **Self-copy refused.** `hasp cp file:///x file:///x` returns an
+   error. Prevents version-counter inflation on backends that version
+   writes (AWS Secrets Manager, Azure Key Vault, GCP Secret Manager).
+3. **Cross-environment refusal.** When both `src` and `dst` are
+   profile aliases AND both profiles declare an `environment = "..."`
+   key in `profiles.toml`, a mismatch refuses without `--yes`. Absent
+   labels disable the check (backwards-compatible).
+4. **Plain-http proxy refusal.** When `HTTP_PROXY` / `HTTPS_PROXY` /
+   `--proxy-url` resolves to an `http://` URL, `cp` refuses unless
+   `HASP_ALLOW_HTTP_PROXY=1` is set. The doubled-exposure window of
+   `cp` makes MITM more costly than for other verbs.
+5. **Audit events to stderr.** `cp.start` and `cp.done` are emitted
+   as single-line JSON records (fields: `event`, `ts`, `src_scheme`,
+   `dst_scheme`, `outcome`, optional `error_kind`). Values, lengths,
+   and value-derived material are never emitted.
+6. **`--verify` uses constant-time comparison** via
+   `subtle::ConstantTimeEq`. A failed verify returns a generic
+   "verify failed: source and destination differ" message with no
+   byte-level diff.
+7. **No atomicity across backends.** A failed `put(dst)` after a
+   successful `get(src)` leaves `dst` in an indeterminate state —
+   either untouched or partially written, depending on the dst
+   backend's semantics. `hasp` cannot promise two-phase commit
+   across heterogeneous stores.
+8. **`cp` copies the value, not the access policy.** Copying from a
+   tightly-controlled store to a loosely-controlled one effectively
+   widens access to the value. `hasp` has no view into either
+   backend's IAM model.
+
+For the full threat model and platform-hardening rationale, see
+`docs/internal/research/RESEARCH-cp-threat-model.md`.
+
 ## `hasp init`
 
 Create a starter `profiles.toml` in the platform config directory.
@@ -148,6 +222,7 @@ hasp man > /usr/share/man/man1/hasp.1
 | Variable | Effect |
 |---|---|
 | `HASP_PROFILES_PATH` | Override the default `profiles.toml` path. |
+| `HASP_ALLOW_HTTP_PROXY` | Set to `1` to allow `hasp cp` through a plain-http proxy. |
 
 ## Address argument
 

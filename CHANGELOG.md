@@ -9,6 +9,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `Store::copy(src, dst, CopyOptions)` and the `hasp cp <src> <dst>`
+  CLI subcommand for cross-backend secret migration. Defaults
+  `if_exists = Fail` (refuses to clobber, opt-in via `--force` /
+  `--if-exists=overwrite`), refuses cross-environment copies between
+  profiles carrying mismatched `environment` labels without `--yes`,
+  refuses to run through a plain-http proxy without
+  `HASP_ALLOW_HTTP_PROXY=1`, supports `--verify` (constant-time
+  readback compare via `subtle::ConstantTimeEq`), and `--explain`
+  acts as dry-run. Emits one-line JSON audit events
+  (`cp.start` / `cp.done`) to stderr with no value or length data.
+- `hasp-core::hardening` module called at CLI process start. Refuses
+  on injection-style env vars (`LD_PRELOAD`, `LD_AUDIT`,
+  `DYLD_INSERT_LIBRARIES`, `DYLD_LIBRARY_PATH`, `DYLD_FRAMEWORK_PATH`,
+  `DYLD_FALLBACK_*`) and `geteuid() != getuid()`. Applies best-effort
+  platform mitigations:
+  - Linux: `prctl(PR_SET_DUMPABLE, 0)`, `setrlimit(RLIMIT_CORE, 0)`.
+  - macOS: `setrlimit(RLIMIT_CORE, 0)`.
+  - Windows: `SetErrorMode(NOGPFAULTERRORBOX | FAILCRITICALERRORS |
+    NOOPENFILEERRORBOX)`, `WerAddExcludedApplication`,
+    `SetProcessMitigationPolicy(ProcessDynamicCodePolicy)`,
+    `SetProcessMitigationPolicy(ProcessExtensionPointDisablePolicy)`,
+    `SetDefaultDllDirectories(SEARCH_SYSTEM32)`.
+- `environment = "..."` field for profile entries in `profiles.toml`,
+  consumed by `hasp cp` for cross-environment refusal.
+- `docs/internal/research/RESEARCH-cp-threat-model.md` documenting the
+  threat model, mitigations, and deferred hardening work.
 - `StoreBuilder::with_retry(max_retries, base_delay)` wrapping HTTP-backed
   default backends (`aws-sm`, `aws-ssm`, `vault`, `gcp-sm`, `azure-kv`) in a
   `RetryBackend` decorator with exponential backoff + jitter for transient
@@ -28,6 +54,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - CI matrix testing `--all-features`, `default-only`, and `minimal-backends`
   to prevent `#[cfg]` rot.
 - Property-based URL parsing tests (`proptest`) for scheme validation.
+
+### Dependencies
+
+- `subtle = "2.6"` — constant-time comparison for `--verify`.
+- `libc` (Unix targets) — `prctl`, `setrlimit`, `geteuid`/`getuid`
+  for the hardening module.
+- `windows-sys` (Windows targets, feature-gated) — `SetErrorMode`,
+  `SetProcessMitigationPolicy`, `WerAddExcludedApplication`,
+  `SetDefaultDllDirectories`.
 
 ### Changed
 
