@@ -6,8 +6,7 @@
 //! current mtime and SHA-256 so that any subsequent modification is
 //! detected before the profile is used.
 //!
-//! Enforcement is opt-in for the first release cycle (`HASP_REQUIRE_PROFILE_ALLOW=1`).
-//! The intent is to default-on after one release of observation.
+//! Enforcement is opt-in: set `HASP_REQUIRE_PROFILE_ALLOW=1` to enable.
 //!
 //! ## Allow-state file format
 //!
@@ -362,21 +361,46 @@ mod tests {
         std::fs::write(&profiles, "[profiles.prod]\ndb = \"env://DB\"").unwrap();
         profile_allow(&profiles).expect("allow");
 
-        // Modify content, and bump mtime by writing again.
+        // Modify content. mtime should bump on most platforms; even
+        // when it doesn't, sha256 will differ — so the check must
+        // refuse via one path or the other.
         std::fs::write(&profiles, "[profiles.prod]\ndb = \"env://DIFFERENT\"").unwrap();
 
-        // The mtime check fires first on most platforms, but the sha256
-        // check fires when mtime resolution is coarse. Either way, the
-        // result must be Modified.
-        let result = check_profile_allowed(&profiles, false);
-        // Could be Ok if mtime resolution is coarser than write time.
-        // In that case sha256 will differ. Just assert not NotAllowed.
-        if let Err(e) = result {
-            assert!(
-                matches!(e, ProfileAllowError::Modified(_)),
-                "expected Modified error, got: {e}"
-            );
-        }
+        let err = check_profile_allowed(&profiles, false)
+            .expect_err("content changed; check must refuse");
+        assert!(
+            matches!(err, ProfileAllowError::Modified(_)),
+            "expected Modified, got: {err}"
+        );
+    }
+
+    #[test]
+    fn check_modified_via_sha256_fallback_when_mtime_matches() {
+        // Forge a `profiles.allowed` whose mtime matches the current
+        // file but whose sha256 does not — proves the sha256 path
+        // fires when mtime is coarse and an attacker tampers within
+        // the same mtime tick.
+        let dir = tempfile::tempdir().unwrap();
+        let profiles = dir.path().join("profiles.toml");
+        std::fs::write(&profiles, "[profiles.prod]\ndb = \"env://DB\"").unwrap();
+
+        let meta = std::fs::metadata(&profiles).unwrap();
+        let mtime = system_time_to_rfc3339(meta.modified().unwrap());
+
+        let forged = format!(
+            "[allowed]\npath = \"{}\"\nmtime = \"{mtime}\"\nsha256 = \"{}\"\n",
+            profiles.display(),
+            // Plausible-looking but wrong digest.
+            "0".repeat(64)
+        );
+        std::fs::write(dir.path().join("profiles.allowed"), forged).unwrap();
+
+        let err = check_profile_allowed(&profiles, false)
+            .expect_err("sha256 mismatch must trip even when mtime matches");
+        assert!(
+            matches!(err, ProfileAllowError::Modified(_)),
+            "expected Modified, got: {err}"
+        );
     }
 
     #[test]

@@ -825,11 +825,9 @@ impl Store {
     /// backends.
     ///
     /// `diff` is the read-only sibling of `copy`: both URLs are
-    /// fetched, the values are compared in constant time, and neither
-    /// the secret bytes nor any length-derived information leak through
-    /// the result. The return is the binary [`DiffOutcome::Match`] /
-    /// [`DiffOutcome::Differ`]; mismatch reveals nothing beyond the
-    /// boolean.
+    /// fetched and compared. The returned [`DiffOutcome`] is binary —
+    /// no byte counts, positions, common prefixes, or hashes are
+    /// observable via the return value.
     ///
     /// # Behavior
     ///
@@ -837,11 +835,22 @@ impl Store {
     /// 2. Both schemes must resolve to a registered backend — same
     ///    pre-flight check as `copy`, so an unknown scheme surfaces
     ///    before any I/O.
-    /// 3. Constant-time compare via
-    ///    [`hasp_core::subtle::ConstantTimeEq`]; identical to the
-    ///    `cp --verify` path.
+    /// 3. Equal-length secrets are compared via
+    ///    [`hasp_core::subtle::ConstantTimeEq`] (the same path
+    ///    `cp --verify` uses).
     /// 4. Both secrets stay inside `SecretString` end-to-end; they are
     ///    dropped (zeroized) as soon as `compare` returns.
+    ///
+    /// # Side-channel scope
+    ///
+    /// The **return value** discloses only the binary equality. An
+    /// observer who can measure wall-clock latency of `compare` may
+    /// still infer that the two secrets had different lengths (the
+    /// length check short-circuits before `ct_eq`). For the threat
+    /// model `diff` is built for — drift detection between known
+    /// stores — this is the same posture as `cp --verify` and is
+    /// accepted. Length-equal secrets that differ byte-wise are
+    /// timing-flat to the extent `subtle::ConstantTimeEq` provides.
     ///
     /// # Errors
     ///

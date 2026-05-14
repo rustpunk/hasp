@@ -274,12 +274,13 @@ fn run(cli: Cli) -> Result<(), (i32, String)> {
     let profiles = profiles::load_profiles()
         .map_err(|e| usage_err(format!("failed to load profiles: {e}")))?;
 
-    // Profile allow-list enforcement. When `HASP_REQUIRE_PROFILE_ALLOW=1`
-    // is set AND `--no-profile-allow` is not given, refuse unless the
+    // Profile allow-list enforcement. Active when
+    // `HASP_REQUIRE_PROFILE_ALLOW` is set to a truthy value (`1` or
+    // `true`) AND `--no-profile-allow` is not given. Refuse unless the
     // current `profiles.toml` has been explicitly marked trusted via
-    // `hasp profile allow`. The check is fast (mtime read, then sha256
-    // only when mtime matches but content may differ).
-    if std::env::var_os("HASP_REQUIRE_PROFILE_ALLOW").is_some()
+    // `hasp profile allow`. Truthy-only semantics match the
+    // documented `=1` contract; `=0`, empty, or unset all disable.
+    if is_truthy_env("HASP_REQUIRE_PROFILE_ALLOW")
         && !matches!(&cli.command, Command::Profile { .. })
     {
         if let Some(profiles_path) = profile_allow::profiles_toml_path() {
@@ -687,6 +688,20 @@ fn profile_environment(address: &str, profiles: &profiles::Profiles) -> Option<S
     let rest = address.strip_prefix('@')?;
     let profile_name = rest.split_once('/').map(|(p, _)| p).unwrap_or(rest);
     profiles.environment(profile_name)
+}
+
+/// Truthy-env predicate. `1` / `true` / `yes` / `on` (case-insensitive)
+/// return true; everything else (including `0`, empty string, unset)
+/// returns false. Avoids the `is_some()` footgun where
+/// `HASP_REQUIRE_PROFILE_ALLOW=0` would enable enforcement.
+fn is_truthy_env(name: &str) -> bool {
+    match std::env::var(name) {
+        Ok(v) => matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        ),
+        Err(_) => false,
+    }
 }
 
 /// Refuse if any well-known proxy env var (or the `--proxy-url` flag)

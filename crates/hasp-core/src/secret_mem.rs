@@ -13,6 +13,25 @@ use crate::SecretString;
 /// want to surface the outcome can call
 /// `hasp_core::lock_secret_pages(s.expose_secret().as_bytes())` directly.
 ///
+/// ## Scope of the lock
+///
+/// `lock_secret_pages` pins the pages backing the **final** `SecretString`
+/// allocation. It does **not** address heap residue from prior
+/// allocations:
+///
+/// - `String::into_boxed_str()` may shrink-to-fit, freeing the
+///   original `String` buffer without zeroization.
+/// - The caller's `String` may have been grown via `push_str` /
+///   `read_to_string`, leaving the secret bytes in freed segments.
+///
+/// In practice this is acceptable for unprivileged CLI processes —
+/// the residue lives in the same uid's address space that already had
+/// the plaintext on the stack — but it is **not** a defense against
+/// kernel-side swap or post-mortem heap forensics. Callers that need
+/// the stronger guarantee should fetch directly into a pre-allocated
+/// `SecretString` (e.g., via a sized `Read` interface) rather than
+/// growing a `String` and wrapping it.
+///
 /// # Usage pattern for backend implementors
 ///
 /// ```no_run
