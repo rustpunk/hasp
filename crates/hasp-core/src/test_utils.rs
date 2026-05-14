@@ -105,12 +105,60 @@ fi
 if [ "$1" = "item" ] && [ "$2" = "list" ]; then
     vault="$4"
     if [ "$vault" = "test-vault" ]; then
-        echo '[{"title": "test-item"}]'
+        # --format=json case — synthesize a minimal items array.
+        # Last positional may be --format=json; either way the vault
+        # is at $4 by construction.
+        case "$*" in
+            *--format=json*)
+                printf '%s' '[{"id":"uuid-test-item","title":"test-item"}]'
+                ;;
+            *)
+                echo '[{"title": "test-item"}]'
+                ;;
+        esac
         exit 0
+    elif [ "$vault" = "missing-vault" ]; then
+        echo "isn't a vault" >&2
+        exit 1
     else
         echo "no items found" >&2
         exit 1
     fi
+fi
+
+if [ "$1" = "item" ] && [ "$2" = "edit" ]; then
+    item="$3"
+    # $4 is --vault, $5 is vault name, $6+ are field=value assignments.
+    vault="$5"
+    if [ "$vault" = "test-vault" ] && [ "$item" = "test-item" ]; then
+        # Edit succeeds for any field assignment on existing items.
+        exit 0
+    fi
+    echo "could not find item" >&2
+    exit 1
+fi
+
+if [ "$1" = "item" ] && [ "$2" = "create" ]; then
+    # `op item create --vault <vault> --title <item> --category password <field>=<value>`
+    # We don't validate the full arg shape — just succeed for known vaults.
+    for arg in "$@"; do
+        case "$arg" in
+            test-vault) exit 0 ;;
+            missing-vault) echo "isn't a vault" >&2; exit 1 ;;
+        esac
+    done
+    exit 0
+fi
+
+if [ "$1" = "item" ] && [ "$2" = "delete" ]; then
+    item="$3"
+    # $4 is --vault, $5 is vault name.
+    vault="$5"
+    if [ "$vault" = "test-vault" ] && [ "$item" = "test-item" ]; then
+        exit 0
+    fi
+    echo "could not find item" >&2
+    exit 1
 fi
 
 echo "unexpected op args: $*" >&2

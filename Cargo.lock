@@ -1574,6 +1574,7 @@ version = "0.1.0-alpha"
 dependencies = [
  "hasp-core",
  "secrecy",
+ "serde_json",
  "url",
 ]
 

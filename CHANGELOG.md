@@ -51,6 +51,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `HASP_CACHE_TTL=<seconds>` env var. Overrides the default cache
   TTL (1..=3600). Values above 3600 clamp to AWS Agent's published
   1-hour ceiling; `0` disables the cache entirely.
+- `op://` backend `put` / `delete` / `list` (#7). `put` issues
+  `op item edit <item> --vault <vault> <field>=<value>`; on NotFound
+  it falls back to `op item create --category password`. `delete`
+  issues `op item delete <item> --vault <vault>` (removes the entire
+  item; the URL's `field` segment is ignored on delete). `list`
+  operates on the vault-only URL shape `op://<vault>` and parses
+  `op item list --vault <vault> --format=json`; emitted `Entry`
+  URLs prefer the JSON `id` (UUID, rename-stable) over the title.
+  All three honor the existing ambient-credential check and
+  subprocess timeout. Argv exposure (`/proc/<pid>/cmdline` is
+  same-uid readable on Linux) is the documented residual surface
+  for `put` since `op` exposes no stdin variant for field values;
+  the same constraint applies to every op-based tool. Symmetric
+  `bw://` write path is filed as a follow-up.
 
 ### Changed
 

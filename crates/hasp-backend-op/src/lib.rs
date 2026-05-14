@@ -1,10 +1,16 @@
 //! `op://` backend for hasp.
 //!
-//! Grammar: `op://vault/item/field` — exactly 3 non-empty path segments.
-//! No query parameters.
+//! Grammar:
+//! - 3-segment form `op://vault/item/field` for `get` / `put` /
+//!   `delete` / `exists`. All three segments non-empty; no query
+//!   parameters.
+//! - Vault-only form `op://vault` for `list`. Host only, no path.
 //!
-//! Supported operations: `get`, `exists`.
-//! `put`, `list`, `delete`: `UnsupportedOperation`.
+//! Supported operations: `get`, `put`, `list`, `delete`, `exists`.
+//! `put` issues `op item edit` and falls back to `op item create` on
+//! NotFound. `delete` removes the entire item; the URL's `field`
+//! segment is ignored on delete. `list` emits `Entry` URLs keyed by
+//! the item UUID when `op item list --format=json` carries `id`.
 //!
 //! `PermissionDenied` is unreachable from `op read` because 1Password's
 //! server returns 404 for both missing and no-permission cases (deliberate
@@ -41,6 +47,56 @@ pub struct OpUrl {
     pub vault: String,
     pub item: String,
     pub field: String,
+}
+
+/// URL shape for `op://` listing.
+///
+/// Listing has different cardinality requirements than `get` / `put` /
+/// `delete`: it operates on a vault prefix (or optionally an item to
+/// list that item's fields). For v1, only the vault-level case is
+/// supported: `op://<vault>` (host only, no path).
+#[derive(Debug)]
+pub struct OpListUrl {
+    pub vault: String,
+}
+
+impl TryFrom<&Url> for OpListUrl {
+    type Error = Error;
+
+    fn try_from(url: &Url) -> Result<Self, Self::Error> {
+        if url.scheme() != "op" {
+            return Err(Error::InvalidUrl("expected op:// scheme".into()));
+        }
+        if url.query().is_some() {
+            return Err(Error::InvalidUrl(
+                "op:// does not accept query parameters".into(),
+            ));
+        }
+        let vault = url
+            .host_str()
+            .ok_or_else(|| Error::InvalidUrl("op:// requires a vault (host)".into()))?;
+        if vault.is_empty() {
+            return Err(Error::InvalidUrl("op:// vault must not be empty".into()));
+        }
+
+        // Tolerate a single empty trailing path segment (the `op://vault/`
+        // form), but reject any non-empty segment for the v1 list grammar.
+        let extras: Vec<&str> = url
+            .path_segments()
+            .into_iter()
+            .flatten()
+            .filter(|s| !s.is_empty())
+            .collect();
+        if !extras.is_empty() {
+            return Err(Error::InvalidUrl(
+                "op:// list requires only a vault (no item or field)".into(),
+            ));
+        }
+
+        Ok(OpListUrl {
+            vault: vault.to_owned(),
+        })
+    }
 }
 
 impl TryFrom<&Url> for OpUrl {
@@ -247,25 +303,166 @@ impl Backend for OpBackend {
         Ok(SecretString::new(secret.into()))
     }
 
-    fn put(&self, _url: &Url, _value: &SecretString) -> Result<(), Error> {
-        Err(Error::UnsupportedOperation {
-            scheme: "op",
-            operation: "put",
-        })
+    fn put(&self, url: &Url, value: &SecretString) -> Result<(), Error> {
+        use hasp_core::ExposeSecret;
+
+        self.ensure_init()?;
+        check_ambient_credentials()?;
+
+        let op_url = OpUrl::try_from(url)?;
+        let reference = format!("op://{}/{}/{}", op_url.vault, op_url.item, op_url.field);
+
+        // `op item edit` requires positional `<field>=<value>` and an
+        // existing item. We try edit first; if `op` reports the item
+        // doesn't exist, fall back to `op item create`.
+        //
+        // Argv exposure: the secret value lives on `op`'s argv for the
+        // life of the subprocess. On Linux, `/proc/<pid>/cmdline` is
+        // same-uid readable. This is the documented cost of the
+        // `op item edit|create` API surface (no stdin variant for
+        // field values). Document in cli-reference.md; PR description
+        // can flag the deferred mitigation as a follow-up.
+        let assignment = format!("{}={}", op_url.field, value.expose_secret());
+
+        let edit_args: [&str; 6] = [
+            "item",
+            "edit",
+            &op_url.item,
+            "--vault",
+            &op_url.vault,
+            &assignment,
+        ];
+        let edit_output = run_op_with_timeout(&edit_args, GET_TIMEOUT)?;
+
+        if edit_output.status.success() {
+            return Ok(());
+        }
+
+        let edit_err = map_op_error(
+            &String::from_utf8_lossy(&edit_output.stderr),
+            edit_output.status.code().unwrap_or(-1),
+            &reference,
+        );
+
+        // Only fall back to create on NotFound. AuthenticationFailed,
+        // PermissionDenied, transport — surface as-is.
+        if !matches!(edit_err, Error::NotFound(_)) {
+            return Err(edit_err);
+        }
+
+        let create_args: [&str; 8] = [
+            "item",
+            "create",
+            "--vault",
+            &op_url.vault,
+            "--title",
+            &op_url.item,
+            "--category",
+            "password",
+        ];
+        // Append the field assignment as a 9th positional. `op item
+        // create` accepts arbitrary `<field>=<value>` after the named
+        // flags; the password category default-assigns the value to
+        // the `password` field, but explicit `<field>=<value>`
+        // overrides for non-default field names.
+        let mut create_args = create_args.to_vec();
+        create_args.push(&assignment);
+        let create_output = run_op_with_timeout(&create_args, GET_TIMEOUT)?;
+
+        if !create_output.status.success() {
+            let stderr = String::from_utf8_lossy(&create_output.stderr);
+            let exit_code = create_output.status.code().unwrap_or(-1);
+            return Err(map_op_error(&stderr, exit_code, &reference));
+        }
+
+        Ok(())
     }
 
-    fn list(&self, _url: &Url) -> Result<Vec<Entry>, Error> {
-        Err(Error::UnsupportedOperation {
+    fn list(&self, url: &Url) -> Result<Vec<Entry>, Error> {
+        self.ensure_init()?;
+        check_ambient_credentials()?;
+
+        let list_url = OpListUrl::try_from(url)?;
+        // `--format=json` gives stable parseable output. Field is not
+        // exposed at item-list granularity; each Entry's URL synthesizes
+        // a placeholder `password` field. Real field-level discovery
+        // requires `op item get --format=json` per item (one extra
+        // subprocess per entry); that's a follow-up.
+        let args = ["item", "list", "--vault", &list_url.vault, "--format=json"];
+
+        let output = run_op_with_timeout(&args, EXISTS_TIMEOUT)?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let exit_code = output.status.code().unwrap_or(-1);
+            let reference = format!("op://{}", list_url.vault);
+            return Err(map_op_error(&stderr, exit_code, &reference));
+        }
+
+        let stdout = String::from_utf8(output.stdout).map_err(|e| Error::Backend {
             scheme: "op",
-            operation: "list",
-        })
+            kind: BackendFailureKind::Permanent,
+            message: format!("op item list produced invalid UTF-8: {e}"),
+        })?;
+
+        let items: Vec<serde_json::Value> =
+            serde_json::from_str(&stdout).map_err(|e| Error::Backend {
+                scheme: "op",
+                kind: BackendFailureKind::Permanent,
+                message: format!("op item list returned unparseable JSON: {e}"),
+            })?;
+
+        let mut entries = Vec::with_capacity(items.len());
+        for item in items {
+            // Prefer `id` (UUID, rename-stable) for the URL identity;
+            // fall back to `title` if `id` is missing (fake-bin tests
+            // emit title-only output for simplicity). Document in
+            // cli-reference.md that title-keyed URLs are rename-fragile;
+            // UUID-keyed cache resolution lands as a follow-up.
+            let id = item
+                .get("id")
+                .and_then(|v| v.as_str())
+                .or_else(|| item.get("title").and_then(|v| v.as_str()));
+            let title = item
+                .get("title")
+                .and_then(|v| v.as_str())
+                .unwrap_or_else(|| id.unwrap_or("?"));
+            let Some(id) = id else { continue };
+
+            let entry_url = format!("op://{}/{}/password", list_url.vault, id);
+            let parsed = Url::parse(&entry_url).map_err(|e| Error::Backend {
+                scheme: "op",
+                kind: BackendFailureKind::Permanent,
+                message: format!("op item list yielded malformed URL: {e}"),
+            })?;
+            entries.push(Entry {
+                name: title.to_owned(),
+                url: parsed,
+            });
+        }
+
+        Ok(entries)
     }
 
-    fn delete(&self, _url: &Url) -> Result<(), Error> {
-        Err(Error::UnsupportedOperation {
-            scheme: "op",
-            operation: "delete",
-        })
+    fn delete(&self, url: &Url) -> Result<(), Error> {
+        self.ensure_init()?;
+        check_ambient_credentials()?;
+
+        let op_url = OpUrl::try_from(url)?;
+        let reference = format!("op://{}/{}/{}", op_url.vault, op_url.item, op_url.field);
+
+        // `op item delete` removes the entire item, not just one field.
+        // The URL's `field` segment is required by op:// grammar but
+        // ignored here. Documented in the per-backend README.
+        let args = ["item", "delete", &op_url.item, "--vault", &op_url.vault];
+        let output = run_op_with_timeout(&args, EXISTS_TIMEOUT)?;
+
+        if output.status.success() {
+            return Ok(());
+        }
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let exit_code = output.status.code().unwrap_or(-1);
+        Err(map_op_error(&stderr, exit_code, &reference))
     }
 
     fn exists(&self, url: &Url) -> Result<bool, Error> {

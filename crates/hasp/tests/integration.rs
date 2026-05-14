@@ -375,6 +375,72 @@ mod op_tests {
             "expected AuthenticationFailed when no ambient credentials are present, got {err:?}"
         );
     }
+
+    #[test]
+    fn op_put_existing_item_succeeds() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _fake = FakeOpGuard::canonical();
+        let _env = EnvGuard::set("OP_SERVICE_ACCOUNT_TOKEN", "fake-token");
+
+        let store = Store::builder().register(hasp::op()).build();
+        let secret = hasp::SecretString::new("new-value".to_string().into());
+        store
+            .put("op://test-vault/test-item/field1", &secret)
+            .expect("put should succeed for existing item");
+    }
+
+    #[test]
+    fn op_put_falls_back_to_create_on_not_found() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _fake = FakeOpGuard::canonical();
+        let _env = EnvGuard::set("OP_SERVICE_ACCOUNT_TOKEN", "fake-token");
+
+        let store = Store::builder().register(hasp::op()).build();
+        let secret = hasp::SecretString::new("created".to_string().into());
+        // missing-item not in fake bin's known set; edit returns
+        // "could not find item" -> NotFound -> create fallback succeeds.
+        store
+            .put("op://test-vault/missing-item/password", &secret)
+            .expect("put should fall back to create");
+    }
+
+    #[test]
+    fn op_delete_existing_item_succeeds() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _fake = FakeOpGuard::canonical();
+        let _env = EnvGuard::set("OP_SERVICE_ACCOUNT_TOKEN", "fake-token");
+
+        let store = Store::builder().register(hasp::op()).build();
+        store
+            .delete("op://test-vault/test-item/field1")
+            .expect("delete should succeed for existing item");
+    }
+
+    #[test]
+    fn op_list_returns_entries() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _fake = FakeOpGuard::canonical();
+        let _env = EnvGuard::set("OP_SERVICE_ACCOUNT_TOKEN", "fake-token");
+
+        let store = Store::builder().register(hasp::op()).build();
+        let entries = store.list("op://test-vault").expect("list should succeed");
+        assert!(!entries.is_empty(), "expected at least one entry");
+        // Entry URL should be UUID-keyed when the JSON had an `id`.
+        assert!(entries
+            .iter()
+            .any(|e| e.url.as_str().contains("uuid-test-item")));
+    }
+
+    #[test]
+    fn op_list_missing_vault_returns_not_found() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _fake = FakeOpGuard::canonical();
+        let _env = EnvGuard::set("OP_SERVICE_ACCOUNT_TOKEN", "fake-token");
+
+        let store = Store::builder().register(hasp::op()).build();
+        let err = store.list("op://missing-vault").unwrap_err();
+        assert!(matches!(err, hasp::Error::NotFound(_)));
+    }
 }
 
 #[cfg(feature = "keyring")]
