@@ -2,11 +2,14 @@ use clap::{ArgAction, CommandFactory, Parser, Subcommand, ValueEnum, ValueHint};
 use clap_complete::engine::ArgValueCompleter;
 use secrecy::ExposeSecret;
 use std::io::{self, IsTerminal, Read, Write};
+use std::sync::Arc;
 
+mod audit_config;
 mod completions;
 mod config_init;
 mod list_format;
 mod profiles;
+mod run;
 use list_format::{format_list, Format};
 
 /// Unified secrets CLI.
@@ -106,6 +109,26 @@ enum Command {
         #[arg(short, long)]
         yes: bool,
     },
+    /// Run a command with secrets injected as environment variables.
+    ///
+    /// `hasp run -e KEY=URL [...] -- <cmd> [args...]` resolves each
+    /// secret through the configured `Store` and execs the command
+    /// with those variables added to its environment. The child
+    /// inherits hasp's exit code (preserved verbatim).
+    ///
+    /// Security: env injection is same-uid readable via
+    /// `/proc/<pid>/environ` on Linux. PTY masking is deferred.
+    Run {
+        /// `KEY=URL` (or `KEY=@profile/key`) pair. Repeatable.
+        #[arg(short = 'e', long = "env", value_name = "KEY=URL")]
+        env: Vec<String>,
+        /// Bypass the stdout-is-TTY refusal.
+        #[arg(long)]
+        allow_tty: bool,
+        /// Command and arguments (everything after `--`).
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        cmd: Vec<String>,
+    },
     /// Initialize a default `profiles.toml` in the platform config dir.
     Init {
         /// Overwrite existing config file.
@@ -175,18 +198,18 @@ fn main() {
 // Mapped from `hasp::Error` variants by `exit_code()`. Soft breaking
 // change from the prior 0/1-only behavior; scripts that grep on a
 // specific non-zero must migrate.
-const EXIT_SUCCESS: i32 = 0;
-const EXIT_USAGE: i32 = 1;
-const EXIT_NOT_FOUND: i32 = 2;
-const EXIT_PERMISSION_DENIED: i32 = 3;
-const EXIT_TRANSPORT: i32 = 4;
-const EXIT_AUTH_FAILED: i32 = 5;
-const EXIT_PRECONDITION: i32 = 6;
+pub(crate) const EXIT_SUCCESS: i32 = 0;
+pub(crate) const EXIT_USAGE: i32 = 1;
+pub(crate) const EXIT_NOT_FOUND: i32 = 2;
+pub(crate) const EXIT_PERMISSION_DENIED: i32 = 3;
+pub(crate) const EXIT_TRANSPORT: i32 = 4;
+pub(crate) const EXIT_AUTH_FAILED: i32 = 5;
+pub(crate) const EXIT_PRECONDITION: i32 = 6;
 // Permanent backend failure that doesn't fit a more-specific code
 // (e.g. unexpected 4xx, malformed response). Distinct from EXIT_USAGE
 // so scripted callers can distinguish a flag mistake from a backend
 // returning something unexpected.
-const EXIT_BACKEND: i32 = 7;
+pub(crate) const EXIT_BACKEND: i32 = 7;
 
 fn run(cli: Cli) -> Result<(), (i32, String)> {
     // Init does not need profiles or a store.
@@ -198,7 +221,11 @@ fn run(cli: Cli) -> Result<(), (i32, String)> {
         .map_err(|e| usage_err(format!("failed to load profiles: {e}")))?;
 
     let proxy = resolve_proxy(&cli, &profiles)?;
-    let store = hasp::StoreBuilder::with_defaults().proxy(proxy).build();
+    let audit_sink = resolve_audit_sink();
+    let store = hasp::StoreBuilder::with_defaults()
+        .proxy(proxy)
+        .with_audit_sink(audit_sink.clone())
+        .build();
 
     // `cp` consumes `--explain` itself by mapping it to `dry_run`
     // because both src and dst need resolving — handled in the Cp arm.
@@ -348,14 +375,13 @@ fn run(cli: Cli) -> Result<(), (i32, String)> {
                 verify,
             };
 
-            // Audit-event stream to stderr (one line JSON, no values
-            // and no lengths). Strongly redacted: only URL scheme,
-            // outcome, and error kind are emitted.
-            let src_scheme = scheme_of(&src_url);
-            let dst_scheme = scheme_of(&dst_url);
-            emit_audit("cp.start", &src_scheme, &dst_scheme, "started", None);
-
+            // Audit emission (cp.start / cp.done) is now produced
+            // inside `Store::copy` so library consumers get the same
+            // event stream the CLI does. The wire format is unchanged;
+            // see `hasp_core::audit`.
             if dry_run && !cli.quiet {
+                let src_scheme = scheme_of(&src_url);
+                let dst_scheme = scheme_of(&dst_url);
                 eprintln!("URL (src):   {src_url}");
                 eprintln!("URL (dst):   {dst_url}");
                 eprintln!("Backend src: {src_scheme}");
@@ -367,34 +393,32 @@ fn run(cli: Cli) -> Result<(), (i32, String)> {
             }
 
             let outcome_result = store.copy(&src_url, &dst_url, opts);
-            match &outcome_result {
-                Ok(o) => {
-                    emit_audit(
-                        "cp.done",
-                        &src_scheme,
-                        &dst_scheme,
-                        if dry_run {
-                            "dry_run"
-                        } else if o.copied {
-                            "copied"
-                        } else {
-                            "skipped"
-                        },
-                        None,
+            if let Ok(o) = &outcome_result {
+                if cli.verbose > 0 && !cli.quiet {
+                    eprintln!(
+                        "hasp: cp {} -> {} (copied={}, verified={})",
+                        src, dst, o.copied, o.verified
                     );
-                    if cli.verbose > 0 && !cli.quiet {
-                        eprintln!(
-                            "hasp: cp {} -> {} (copied={}, verified={})",
-                            src, dst, o.copied, o.verified
-                        );
-                    }
-                }
-                Err(e) => {
-                    let kind = error_kind(e);
-                    emit_audit("cp.done", &src_scheme, &dst_scheme, "error", Some(kind));
                 }
             }
             outcome_result.map_err(cli_error)?;
+        }
+        Command::Run {
+            env,
+            allow_tty,
+            cmd,
+        } => {
+            let exit = run::run(
+                &store,
+                &profiles,
+                audit_sink.clone(),
+                env,
+                cmd,
+                allow_tty,
+                cli.quiet,
+                cli.verbose,
+            )?;
+            std::process::exit(exit);
         }
         Command::Init { force } => {
             config_init::init(force).map_err(usage_err)?;
@@ -424,7 +448,10 @@ fn run(cli: Cli) -> Result<(), (i32, String)> {
 ///
 /// If the address starts with `@`, look it up in the profile resolver.
 /// Otherwise return it unchanged, validating that it looks like a URL.
-fn resolve(address: &str, profiles: &profiles::Profiles) -> Result<String, (i32, String)> {
+pub(crate) fn resolve(
+    address: &str,
+    profiles: &profiles::Profiles,
+) -> Result<String, (i32, String)> {
     if let Some(rest) = address.strip_prefix('@') {
         let url = profiles
             .resolve(rest)
@@ -490,7 +517,11 @@ fn command_address(cli: &Cli) -> Option<&str> {
         | Command::List { address, .. }
         | Command::Delete { address }
         | Command::Exists { address } => Some(address.as_str()),
-        Command::Cp { .. } | Command::Init { .. } | Command::Man | Command::Complete { .. } => None,
+        Command::Cp { .. }
+        | Command::Run { .. }
+        | Command::Init { .. }
+        | Command::Man
+        | Command::Complete { .. } => None,
     }
 }
 
@@ -503,6 +534,7 @@ fn command_verb(cli: &Cli) -> &'static str {
         Command::Delete { .. } => "delete",
         Command::Exists { .. } => "exists",
         Command::Cp { .. } => "cp",
+        Command::Run { .. } => "run",
         Command::Init { .. } => "init",
         Command::Man => "man",
         Command::Complete { .. } => "complete",
@@ -519,12 +551,16 @@ fn command_addresses(cli: &Cli) -> Vec<&str> {
         Command::Delete { address } => vec![address.as_str()],
         Command::Exists { address } => vec![address.as_str()],
         Command::Cp { src, dst, .. } => vec![src.as_str(), dst.as_str()],
+        Command::Run { env, .. } => env
+            .iter()
+            .filter_map(|s| s.split_once('=').map(|(_, v)| v))
+            .collect(),
         Command::Init { .. } | Command::Man | Command::Complete { .. } => vec![],
     }
 }
 
 /// Extract the URL scheme of a resolved URL string.
-fn scheme_of(url: &str) -> String {
+pub(crate) fn scheme_of(url: &str) -> String {
     url.split_once("://")
         .map(|(s, _)| s.to_owned())
         .unwrap_or_else(|| url.to_owned())
@@ -538,42 +574,21 @@ fn profile_environment(address: &str, profiles: &profiles::Profiles) -> Option<S
     profiles.environment(profile_name)
 }
 
-/// Emit a single-line JSON audit event to stderr.
+/// Build the [`hasp::AuditSink`] for this CLI invocation.
 ///
-/// The record never includes secret values, byte lengths, or any
-/// derived material — only schemes, outcome label, and (optionally)
-/// an error-kind classifier. Downstream SIEMs can ingest the stream
-/// without value-leak risk.
-fn emit_audit(
-    event: &str,
-    src_scheme: &str,
-    dst_scheme: &str,
-    outcome: &str,
-    error_kind: Option<&'static str>,
-) {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let ts = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let mut obj = serde_json::Map::new();
-    obj.insert("event".into(), serde_json::Value::String(event.into()));
-    obj.insert("ts".into(), serde_json::Value::Number(ts.into()));
-    obj.insert(
-        "src_scheme".into(),
-        serde_json::Value::String(src_scheme.into()),
-    );
-    obj.insert(
-        "dst_scheme".into(),
-        serde_json::Value::String(dst_scheme.into()),
-    );
-    obj.insert("outcome".into(), serde_json::Value::String(outcome.into()));
-    if let Some(k) = error_kind {
-        obj.insert("error_kind".into(), serde_json::Value::String(k.into()));
-    }
-    if let Ok(line) = serde_json::to_string(&serde_json::Value::Object(obj)) {
-        let _ = writeln!(io::stderr(), "{line}");
-    }
+/// Resolution layers (highest precedence first):
+/// 1. `HASP_AUDIT` env var (`off` / `file` / `syslog` / `stderr`),
+///    refined by `HASP_AUDIT_PATH` (file mode) and `HASP_AUDIT_IDENT`
+///    (syslog mode).
+/// 2. `audit.toml` `[audit]` section, located via
+///    `HASP_AUDIT_CONFIG_PATH` or `~/.config/hasp/audit.toml`.
+/// 3. Default: [`hasp::StderrSink`].
+///
+/// File-open failures, syslog-open failures, and unknown sink labels
+/// degrade to safe defaults — audit must never poison a verb's
+/// result. See [`audit_config`] for the full table.
+fn resolve_audit_sink() -> Arc<dyn hasp::AuditSink> {
+    audit_config::AuditConfig::resolve().into_sink()
 }
 
 /// CLI exit-code mapping for library errors. Exit codes are CLI policy,
@@ -604,14 +619,14 @@ fn exit_code(err: &hasp::Error) -> i32 {
 }
 
 /// Combine `exit_code` and `fmt_error` into the pair propagated by `run`.
-fn cli_error(err: hasp::Error) -> (i32, String) {
+pub(crate) fn cli_error(err: hasp::Error) -> (i32, String) {
     let code = exit_code(&err);
     let message = fmt_error(err);
     (code, message)
 }
 
 /// Wrap a `String` CLI-policy error (usage, IO, config parse) as code 1.
-fn usage_err(message: String) -> (i32, String) {
+pub(crate) fn usage_err(message: String) -> (i32, String) {
     (EXIT_USAGE, message)
 }
 
@@ -619,7 +634,7 @@ fn usage_err(message: String) -> (i32, String) {
 /// as code 6 (precondition). The refusal originates in the CLI rather
 /// than the library, but maps onto the same semantic — "preconditions
 /// for this operation are not met."
-fn precondition_err(message: String) -> (i32, String) {
+pub(crate) fn precondition_err(message: String) -> (i32, String) {
     (EXIT_PRECONDITION, message)
 }
 
@@ -637,24 +652,6 @@ fn compose_field(url: &str, path: &str) -> Result<String, (i32, String)> {
     }
     parsed.query_pairs_mut().append_pair("field", path);
     Ok(parsed.into())
-}
-
-/// Stable classifier for `hasp::Error` variants. Used in audit events
-/// so consumers can pattern-match on the kind without parsing the
-/// human-readable message.
-fn error_kind(err: &hasp::Error) -> &'static str {
-    match err {
-        hasp::Error::UrlParse(_) => "url_parse",
-        hasp::Error::InvalidUrl(_) => "invalid_url",
-        hasp::Error::UnknownScheme(_) => "unknown_scheme",
-        hasp::Error::UnsupportedOperation { .. } => "unsupported_operation",
-        hasp::Error::NotFound(_) => "not_found",
-        hasp::Error::PermissionDenied(_) => "permission_denied",
-        hasp::Error::AuthenticationFailed(_) => "auth_failed",
-        hasp::Error::PreconditionFailed(_) => "precondition_failed",
-        hasp::Error::Backend { .. } => "backend",
-        _ => "other",
-    }
 }
 
 /// Read a secret value from argument, stdin, or TTY prompt.

@@ -9,13 +9,18 @@ file:///absolute/path/to/secret
 file://localhost/absolute/path/to/secret
 file://./relative/path/to/secret
 file:///absolute/path/to/secret?raw=true
+file:///etc/secrets/*.key                       # glob for list
+file:///etc/secrets/**/*.key?hidden=1           # recursive, include dotfiles
 ```
 
 - **Absolute paths** use an empty host or `localhost`: `file:///etc/secrets/db.txt`.
 - **Relative paths** use `.` as the host: `file://./config/secrets.txt`
   (resolved relative to the current working directory).
-- **`?raw=true`** disables the default newline trimming. No other query
-  parameters are accepted.
+- **`?raw=true`** (get only) disables the default newline trimming.
+- **`?hidden=1`** (list only) includes dotfiles. Off by default.
+- **`?follow_symlinks=1`** (list only) follows symlinks during `**`
+  traversal. Off by default — prevents glob patterns from escaping the
+  intended directory tree.
 
 ## Supported operations
 
@@ -25,7 +30,7 @@ file:///absolute/path/to/secret?raw=true
 | `put`     | Write secret to file; creates parent directories if missing. |
 | `exists`  | `true` if the path exists. |
 | `delete`  | Remove the file. |
-| `list`    | `UnsupportedOperation` — directory enumeration is not implemented. |
+| `list`    | Unix shell glob (`*`, `**`, `?`, `[abc]`) over the path component. Only regular files are returned; symlinks and dotfiles excluded by default. |
 
 ## Default newline trimming
 

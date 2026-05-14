@@ -15,6 +15,7 @@ Commands:
   delete  Delete a secret
   exists  Check whether a secret exists
   cp      Copy a secret from one URL or alias to another
+  run     Run a command with secrets injected as environment variables
   init    Create a starter profiles.toml
   help    Print this message or the help of the given subcommand(s)
 
@@ -195,10 +196,9 @@ The defaults are deliberately stricter than Unix `cp`:
    `--proxy-url` resolves to an `http://` URL, `cp` refuses unless
    `HASP_ALLOW_HTTP_PROXY=1` is set. The doubled-exposure window of
    `cp` makes MITM more costly than for other verbs.
-5. **Audit events to stderr.** `cp.start` and `cp.done` are emitted
-   as single-line JSON records (fields: `event`, `ts`, `src_scheme`,
-   `dst_scheme`, `outcome`, optional `error_kind`). Values, lengths,
-   and value-derived material are never emitted.
+5. **Audit events.** `cp.start` and `cp.done` are emitted by the
+   library; see [Audit events](#audit-events) for the wire format and
+   how to redirect or disable them.
 6. **`--verify` uses constant-time comparison** via
    `subtle::ConstantTimeEq`. A failed verify returns a generic
    "verify failed: source and destination differ" message with no
@@ -215,6 +215,42 @@ The defaults are deliberately stricter than Unix `cp`:
 
 For the full threat model and platform-hardening rationale, see
 `docs/internal/research/RESEARCH-cp-threat-model.md`.
+
+## `hasp run -e KEY=URL [...] -- <cmd> [args...]`
+
+Fetch secrets by URL and inject them as environment variables into a
+child process. The child inherits hasp's exit code verbatim.
+
+```bash
+hasp run -e DB_PASS=aws-sm://us-east-1/prod/db \
+         -e API_TOKEN=vault://kv/data/app/api?field=token \
+         -- ./my-app --serve
+
+# Mix schemes; field extraction from #5 works here too
+hasp run -e TOKEN=aws-sm://us-east-1/prod/creds?field=api_key \
+         -- ./service
+```
+
+- **`-e KEY=URL`** is repeatable. Each URL is resolved through the
+  configured `Store`; `-e DB_PASS=@prod/db` also works (profile
+  alias).
+- **All-or-nothing:** if any fetch fails, the child is never spawned
+  and hasp returns the appropriate exit code (e.g. 2 for not-found).
+- **Duplicate keys** are refused at startup (exit code 1).
+- **TTY refusal:** neither stdout nor stderr may be a terminal when
+  invoking `run` — accidental use like `hasp run -- echo $DB_PASS`
+  would expose secrets in the terminal scroll buffer regardless of
+  which stream the child writes to. Pass `--allow-tty` to override
+  for interactive debugging.
+- **`/proc/<pid>/environ` visibility:** on Linux, same-uid processes
+  can read a child's environment via `/proc/<pid>/environ`. This is
+  the inherent cost of env injection. For the highest-isolation
+  workloads, consider named-pipe or tmpfs delivery instead.
+- **PTY masking** (1Password's `op run` feature — intercepts the
+  child's stdout to mask accidentally echoed secrets) is not yet
+  implemented; scheduled as a follow-up.
+- **Audit events:** `run.start` and `run.done` are emitted; each
+  intermediate `get` emits its own `get.start`/`get.done` events.
 
 ## `hasp init`
 
@@ -257,12 +293,99 @@ hasp man > /usr/share/man/man1/hasp.1
 | `-q, --quiet` | Suppress non-error informational output. |
 | `-v, --verbose` | Increase output verbosity; prints operation traces to stderr. Can be used multiple times (`-vv`). |
 
+## Audit events
+
+Every hasp verb emits structured `*.start` / `*.done` JSON events to
+stderr (one line each). The wire format:
+
+```json
+{"event":"get.done","ts":1747612345,"src_scheme":"vault","outcome":"ok"}
+{"event":"cp.done","ts":1747612346,"src_scheme":"vault","dst_scheme":"file","outcome":"copied"}
+{"event":"get.done","ts":1747612347,"src_scheme":"env","outcome":"error","error_kind":"not_found"}
+```
+
+Fields: `event` (closed set), `ts` (UNIX seconds), `src_scheme`,
+`dst_scheme` (cp/run only), `outcome`, `error_kind` (on failure).
+**No values, no lengths, no value-derived material are ever emitted.**
+
+### Controlling the sink
+
+Resolution order (highest precedence first):
+1. `HASP_AUDIT` env var.
+2. `~/.config/hasp/audit.toml` (override location with
+   `HASP_AUDIT_CONFIG_PATH`).
+3. Default: stderr.
+
+Env vars:
+
+| Env var | Value | Behaviour |
+|---|---|---|
+| `HASP_AUDIT` | *(unset)* | Use `audit.toml` if present, else stderr |
+| `HASP_AUDIT` | `off` | Suppress all audit output |
+| `HASP_AUDIT` | `stderr` | Write JSON lines to stderr |
+| `HASP_AUDIT` | `file` | Write to `HASP_AUDIT_PATH` (falls back to stderr if path is empty, `NoopSink` if open fails) |
+| `HASP_AUDIT` | `syslog` | Forward to local syslog daemon (Unix only); ident from `HASP_AUDIT_IDENT` (default `"hasp"`). Falls back to stderr on Windows. |
+| `HASP_AUDIT_PATH` | `/path/to/audit.log` | Log file for `file` mode (`0600` on Unix) |
+| `HASP_AUDIT_IDENT` | `"hasp"` | Program ident shown in syslog entries (`syslog` mode) |
+| `HASP_AUDIT_CONFIG_PATH` | `/path/to/audit.toml` | Override the default `audit.toml` location |
+
+Example `~/.config/hasp/audit.toml`:
+
+```toml
+[audit]
+sink = "file"
+path = "/var/log/hasp/audit.log"
+
+# Or:
+# [audit]
+# sink = "syslog"
+# ident = "hasp-prod"
+```
+
+Library consumers: pass an `Arc<dyn hasp::AuditSink>` to
+`StoreBuilder::with_audit_sink(...)` to install a custom sink.
+`SyslogSink` is gated on `#[cfg(unix)]` and wraps the libc syslog
+client (`openlog` / `syslog` / `closelog`) so it picks up the
+platform's native socket path (`/dev/log` on Linux,
+`/var/run/syslog` on macOS) without a third-party dependency.
+
+### Threat model
+
+The audit stream documents that an access happened — it is not a
+forensic guarantee that one *will* happen for every secret retrieval.
+Trust boundary:
+
+- **Same-uid tampering.** A process running as the same uid as
+  `hasp` can redirect or suppress the audit stream — for example by
+  setting `HASP_AUDIT=off` before invoking `hasp`, by truncating the
+  log file an earlier invocation wrote, or by overwriting the
+  binary. Treat the stream as best-effort telemetry from a
+  cooperating caller, not as a tamper-evident security log. For
+  tamper-evident logging, ship the stream off-host (e.g. syslog
+  forwarding to a write-once collector) or run `hasp` in a
+  privilege-separated environment.
+- **Concurrent writers.** `FileSink` serializes writes via an
+  internal `Mutex<File>`; concurrent invocations of `hasp`
+  writing to the same path will not interleave bytes within a
+  single process but two separate hasp processes appending to the
+  same path may produce events out of timestamp order. Sort by
+  `ts` on ingest.
+- **No value leakage.** `AuditEvent`'s field set is closed
+  (`#[non_exhaustive]`) and every field is either a timestamp, a
+  `&'static str` from a closed set, or a URL scheme. No
+  implementation of `AuditSink` can leak a value or a
+  value-derived length.
+
 ## Environment variables
 
 | Variable | Effect |
 |---|---|
 | `HASP_PROFILES_PATH` | Override the default `profiles.toml` path. |
 | `HASP_ALLOW_HTTP_PROXY` | Set to `1` to allow `hasp cp` through a plain-http proxy. |
+| `HASP_AUDIT` | Audit sink mode: unset=stderr (or `audit.toml`), `off`=silent, `file`=log file, `syslog`=local syslog daemon (Unix). |
+| `HASP_AUDIT_PATH` | Path for `HASP_AUDIT=file` mode (append, `0600` on Unix). |
+| `HASP_AUDIT_IDENT` | Program ident for `HASP_AUDIT=syslog` mode (default `"hasp"`). |
+| `HASP_AUDIT_CONFIG_PATH` | Override `~/.config/hasp/audit.toml` location. |
 
 ## Address argument
 

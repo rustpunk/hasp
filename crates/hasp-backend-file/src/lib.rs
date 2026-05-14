@@ -3,10 +3,18 @@
 //! Grammar:
 //! - `file:///absolute/path` — absolute path (host empty or `localhost`)
 //! - `file://./relative/path` — relative to current working directory (host = `.`)
-//! - `?raw=true` — disables the default newline trim
+//! - `?raw=true` — disables the default newline trim (get only)
 //!
-//! Supported operations: `get`, `put`, `exists`, `delete`.
-//! `list` returns `UnsupportedOperation`.
+//! `list` supports glob patterns in the path component:
+//! - `file:///etc/secrets/*.key`
+//! - `file:///etc/secrets/**/*.key`
+//!
+//! Query params for `list`:
+//! - `?hidden=1` — include dotfiles (default: exclude)
+//! - `?follow_symlinks=1` — follow symlinks during `**` traversal
+//!   (default: skip — prevents escaping the intended tree)
+//!
+//! Supported operations: `get`, `put`, `exists`, `delete`, `list`.
 
 use hasp_core::{Backend, BackendFailureKind, Entry, Error, ExposeSecret, SecretString};
 use std::path::PathBuf;
@@ -19,6 +27,10 @@ use url::Url;
 pub struct FileUrl {
     pub path: PathBuf,
     pub raw: bool,
+    /// Include dotfiles in `list` results.
+    pub hidden: bool,
+    /// Follow symlinks during `**` glob traversal in `list`.
+    pub follow_symlinks: bool,
 }
 
 impl TryFrom<&Url> for FileUrl {
@@ -41,14 +53,19 @@ impl TryFrom<&Url> for FileUrl {
         }
 
         let mut raw = false;
+        let mut hidden = false;
+        let mut follow_symlinks = false;
         for (k, v) in url.query_pairs() {
-            if k == "raw" && v == "true" {
-                raw = true;
-            } else {
-                return Err(Error::InvalidUrl(format!(
-                    "file:// unknown query parameter or value: {}={}",
-                    k, v
-                )));
+            match k.as_ref() {
+                "raw" if v == "true" => raw = true,
+                "hidden" if v == "1" => hidden = true,
+                "follow_symlinks" if v == "1" => follow_symlinks = true,
+                _ => {
+                    return Err(Error::InvalidUrl(format!(
+                        "file:// unknown query parameter or value: {}={}",
+                        k, v
+                    )))
+                }
             }
         }
 
@@ -65,7 +82,12 @@ impl TryFrom<&Url> for FileUrl {
                 .map_err(|_| Error::InvalidUrl("file:// invalid absolute path".into()))?
         };
 
-        Ok(FileUrl { path, raw })
+        Ok(FileUrl {
+            path,
+            raw,
+            hidden,
+            follow_symlinks,
+        })
     }
 }
 
@@ -108,11 +130,83 @@ impl Backend for FileBackend {
         Ok(())
     }
 
-    fn list(&self, _url: &Url) -> Result<Vec<Entry>, Error> {
-        Err(Error::UnsupportedOperation {
-            scheme: "file",
-            operation: "list",
-        })
+    fn list(&self, url: &Url) -> Result<Vec<Entry>, Error> {
+        let file_url = FileUrl::try_from(url)?;
+        let pattern = file_url
+            .path
+            .to_str()
+            .ok_or_else(|| Error::InvalidUrl("file:// path is not valid UTF-8".into()))?;
+
+        // Containment root: the longest path prefix of `pattern` that
+        // contains no glob metacharacters. When `follow_symlinks =
+        // false` we require every returned path's canonical form to
+        // remain under the canonical root, which closes the
+        // symlink-directory-mid-pattern escape the leaf
+        // `symlink_metadata` check below does NOT cover. (`glob`'s
+        // `**` traversal follows symlinked directories regardless.)
+        let canon_root = if !file_url.follow_symlinks {
+            literal_prefix(pattern).and_then(|p| std::fs::canonicalize(p).ok())
+        } else {
+            None
+        };
+
+        let mut entries = Vec::new();
+        let glob_opts = glob::MatchOptions {
+            case_sensitive: true,
+            require_literal_separator: true,
+            require_literal_leading_dot: !file_url.hidden,
+        };
+        let paths = glob::glob_with(pattern, glob_opts)
+            .map_err(|e| Error::InvalidUrl(format!("file:// invalid glob pattern: {e}")))?;
+
+        for result in paths {
+            let path = result.map_err(|e| Error::Backend {
+                scheme: "file",
+                kind: hasp_core::BackendFailureKind::Transient,
+                message: format!("glob traversal error: {e}"),
+            })?;
+
+            // Leaf symlink filter: skip if the leaf itself is a symlink.
+            if !file_url.follow_symlinks {
+                if let Ok(meta) = std::fs::symlink_metadata(&path) {
+                    if meta.file_type().is_symlink() {
+                        continue;
+                    }
+                }
+                // Containment: reject any candidate whose resolved
+                // canonical form is outside the canonical pattern
+                // root. Catches symlinked subdirectories that `glob`'s
+                // `**` traversal silently followed. If we cannot
+                // canonicalize either side, drop the candidate — safer
+                // to under-report than to leak an escape.
+                if let Some(root) = &canon_root {
+                    match std::fs::canonicalize(&path) {
+                        Ok(canon) if canon.starts_with(root) => {}
+                        _ => continue,
+                    }
+                }
+            }
+
+            // Only emit paths that point to regular files (not dirs).
+            // This matches the get/put contract: every Entry URL is
+            // directly get()-able.
+            if !path.is_file() {
+                continue;
+            }
+
+            let path_url = Url::from_file_path(&path).map_err(|_| Error::Backend {
+                scheme: "file",
+                kind: hasp_core::BackendFailureKind::Permanent,
+                message: format!("cannot convert path to URL: {}", path.display()),
+            })?;
+            let name = path.to_string_lossy().into_owned();
+            entries.push(Entry {
+                name,
+                url: path_url,
+            });
+        }
+
+        Ok(entries)
     }
 
     fn delete(&self, url: &Url) -> Result<(), Error> {
@@ -125,6 +219,17 @@ impl Backend for FileBackend {
         let file_url = FileUrl::try_from(url)?;
         Ok(file_url.path.exists())
     }
+}
+
+/// Return the longest leading directory of `pattern` that contains no
+/// glob metacharacter (`*`, `?`, `[`). Used as the containment root
+/// for `list` so symlinked subdirectories cannot redirect a `**`
+/// traversal outside the user-named tree.
+fn literal_prefix(pattern: &str) -> Option<std::path::PathBuf> {
+    let stop = pattern.find(['*', '?', '[']).unwrap_or(pattern.len());
+    let head = &pattern[..stop];
+    let last_sep = head.rfind('/')?;
+    Some(std::path::PathBuf::from(&head[..=last_sep]))
 }
 
 /// Strips exactly one trailing `\r\n` or `\n` from the given string.
@@ -306,16 +411,12 @@ mod tests {
     }
 
     #[test]
-    fn backend_list_unsupported() {
+    fn backend_list_no_match_returns_empty() {
+        let dir = tempfile::tempdir().unwrap();
         let backend = FileBackend;
-        let url = Url::parse("file:///etc/secrets").unwrap();
-        let result = backend.list(&url);
-        assert!(matches!(
-            result,
-            Err(Error::UnsupportedOperation {
-                scheme: "file",
-                operation: "list",
-            })
-        ));
+        let pattern = format!("{}/*.nomatch", dir.path().display());
+        let url = Url::parse(&format!("file://{pattern}")).unwrap();
+        let entries = backend.list(&url).unwrap();
+        assert!(entries.is_empty());
     }
 }

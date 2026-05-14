@@ -11,6 +11,8 @@ description = "file:// backend for hasp — reads secrets from files."
 hasp-core = { path = "../hasp-core" }
 url = "2.5"
 secrecy = "0.10"
+# Vetted 2026-05-14: rust-lang/glob, zero advisories, canonical glob crate.
+glob = "0.3"
 
 [dev-dependencies]
 tempfile = "3"

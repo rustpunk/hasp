@@ -8,7 +8,7 @@ them; you can trim the set at compile time via Cargo features.
 | Backend | `get` | `put` | `list` | `delete` | `exists` |
 |---|---|---|---|---|---|
 | `env://` | ✅ | ❌ | ❌ | ❌ | ✅ |
-| `file://` | ✅ | ✅ | ❌ | ✅ | ✅ |
+| `file://` | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `keyring://` | ✅ | ✅ | ❌ | ✅ | ✅ |
 | `op://` | ✅ | ❌ | ❌ | ❌ | ✅ |
 | `vault://` | ✅ | ❌ | ❌ | ❌ | ✅ |
@@ -35,6 +35,10 @@ hasp exists env://NONEXISTENT || echo "missing"
 hasp get file:///etc/secrets/db-password
 hasp put file:///tmp/secret "my-value"
 hasp delete file:///tmp/secret
+
+# List with glob (shell-quote the pattern to prevent shell expansion)
+hasp list 'file:///etc/secrets/*.key'
+hasp list 'file:///etc/secrets/**/*.key'
 ```
 
 - **Creates parent directories** on `put`.
@@ -42,6 +46,18 @@ hasp delete file:///tmp/secret
   `"secret\n"` is read back as `"secret"`.
 - **Permissions** are whatever your umask produces; hasp does not
   force `0600`.
+- **Glob `list`**: the path component may contain Unix shell glob
+  patterns (`*`, `**`, `?`, `[abc]`). `**` traverses subdirectories.
+  Shell-quote the URL to prevent early expansion.
+
+  | Query param | Default | Meaning |
+  |---|---|---|
+  | `?hidden=1` | off | Include dotfiles |
+  | `?follow_symlinks=1` | off | Follow symlinks during `**` traversal |
+
+  Symlinks are excluded by default to prevent glob patterns from
+  escaping the intended directory tree. Only regular files are returned
+  (no directories). Each returned entry URL is directly `get`-able.
 
 ## `keyring://` — OS keyring
 
