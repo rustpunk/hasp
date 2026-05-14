@@ -8,9 +8,7 @@ on:
 permissions:
   contents: write
   # OIDC token + attestations API for SLSA build provenance via
-  # actions/attest-build-provenance. The Bitwarden CLI 2026.4.0 npm
-  # compromise is the standing argument; see
-  # docs/internal/research/RESEARCH-cp-threat-model.md.
+  # actions/attest-build-provenance.
   id-token: write
   attestations: write
 

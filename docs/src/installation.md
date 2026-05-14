@@ -46,20 +46,16 @@ gh attestation verify hasp-linux-x64.tar.gz \
   --owner rustpunk
 ```
 
-For offline / air-gapped verification, download the `.intoto.jsonl`
-alongside the artifact and use
-[`slsa-verifier`](https://github.com/slsa-framework/slsa-verifier):
+This queries the GitHub attestations API, fetches the signed bundle,
+and verifies the artifact's digest. No additional flags are needed —
+the workflow + commit + builder identity are all proven in one call.
 
-```bash
-curl -L -o hasp-linux-x64.tar.gz \
-  https://github.com/rustpunk/hasp/releases/latest/download/hasp-linux-x64.tar.gz
-curl -L -o hasp-linux-x64.tar.gz.intoto.jsonl \
-  https://github.com/rustpunk/hasp/releases/latest/download/hasp-linux-x64.tar.gz.intoto.jsonl
-
-slsa-verifier verify-artifact hasp-linux-x64.tar.gz \
-  --provenance-path hasp-linux-x64.tar.gz.intoto.jsonl \
-  --source-uri github.com/rustpunk/hasp
-```
+For offline / air-gapped verification, the sigstore bundle is published
+alongside each release artifact as `<asset>.intoto.jsonl`. Pass it to
+any sigstore-compatible verifier — see GitHub's
+[verifying attestations offline](https://docs.github.com/en/actions/security-for-github-actions/using-artifact-attestations/verifying-attestations-offline)
+guide for the current toolchain (`gh attestation verify --bundle` plus
+`--no-api`, or [`cosign verify-blob-attestation`](https://docs.sigstore.dev/cosign/verifying/attestation/)).
 
 The attestation establishes **Build L2** in the SLSA terminology: the
 build identity is verifiable, but the build environment is not

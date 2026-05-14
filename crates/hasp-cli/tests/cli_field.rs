@@ -38,9 +38,7 @@ fn explain_threads_field_into_resolved_url() {
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("field=.creds.password")
-            || stderr.contains("field=.creds%2Epassword")
-            || stderr.contains("field=.creds.password"),
+        stderr.contains("field=.creds.password"),
         "explain output should include the threaded field, got: {stderr}"
     );
 }

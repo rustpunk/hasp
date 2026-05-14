@@ -466,10 +466,6 @@ fn resolve_proxy(
     Ok(None)
 }
 
-/// Extract the primary address argument from the current CLI command.
-///
-/// Returns `None` for `cp` because `cp` has two addresses and handles
-/// `--explain` inside its own arm rather than the shared early branch.
 /// Extract the `--field` flag value for verbs that support it.
 fn command_field(cli: &Cli) -> Option<&str> {
     match &cli.command {
@@ -478,6 +474,10 @@ fn command_field(cli: &Cli) -> Option<&str> {
     }
 }
 
+/// Extract the primary address argument from the current CLI command.
+///
+/// Returns `None` for `cp` because `cp` has two addresses and handles
+/// `--explain` inside its own arm rather than the shared early branch.
 fn command_address(cli: &Cli) -> Option<&str> {
     match &cli.command {
         Command::Get { address, .. }
