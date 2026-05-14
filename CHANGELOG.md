@@ -100,6 +100,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   commits, release 2026-03-22, MIT/Apache-2.0, used by crates.io).
   Required for the synchronous eviction listener that lets the cache
   zeroize evicted `Arc<SecretString>` entries on Drop.
+- `dirs = "6"` on `hasp-core` (optional, behind `cache-persistent`).
+  Resolves the default persistent-cache file path. Already a
+  workspace dep elsewhere.
+- `serde_json` on `hasp-backend-op` (workspace dep). Used to parse
+  `op item list --format=json`.
+
+### Follow-up issues filed for next sprint
+
+- #22 — op:// cross-invocation persistent cache (Approach A
+  implementation: encrypted file + OS-keyring-bound key +
+  UUID-tuple cache keys).
+- #23 — bw:// write path (symmetric to #7).
+- #24 — Heap-residue mitigation via sized-read backend API.
+- #25 — PTY masking for `hasp run` (deferred from #2 MVP).
 
 - `hasp diff <a> <b>` and `Store::compare(a, b) -> DiffOutcome` for
   cross-backend drift detection (#1). Read-only sibling of `cp`: fetches
