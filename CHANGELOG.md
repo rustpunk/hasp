@@ -24,9 +24,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Every `Store` verb now emits `*.start` / `*.done` structured
   one-line JSON events to the configured `AuditSink`. Built-in sinks:
   `StderrSink` (default, preserves existing `cp` behavior), `FileSink`
-  (append, `0600` on Unix), `NoopSink` (silent). CLI sink is
-  configured via `HASP_AUDIT` / `HASP_AUDIT_PATH`. The sink is
-  installed at CLI startup via `StoreBuilder::with_audit_sink`.
+  (append, `0600` on Unix), `SyslogSink` (Unix-only, wraps `libc`'s
+  `openlog`/`syslog`/`closelog`; no new crate dependency), and
+  `NoopSink` (silent). CLI sink is configured via env vars
+  (`HASP_AUDIT` / `HASP_AUDIT_PATH` / `HASP_AUDIT_IDENT`) or via
+  `~/.config/hasp/audit.toml` (`HASP_AUDIT_CONFIG_PATH` to override
+  the path); env vars take precedence over the TOML file. The sink
+  is installed at CLI startup via `StoreBuilder::with_audit_sink`.
   Security invariant: `AuditEvent` is `#[non_exhaustive]` with only
   `'static` classifier strings and a timestamp — values, lengths, and
   value-derived material cannot appear in any serialized event (a
@@ -34,11 +38,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   this). `Error::kind() -> &'static str` added for stable audit
   classification, replacing the former CLI-only `error_kind` function.
   Threat-model note (same-uid tamperability) documented in
-  `docs/src/cli-reference.md#threat-model`. **Deferred:** the
-  `SyslogSink` and `audit.toml` config items from the #12 acceptance
-  list. Env-var configuration (`HASP_AUDIT`/`HASP_AUDIT_PATH`)
-  covers the common ops use cases; a TOML-backed sink configuration
-  and a syslog binding land in a follow-up.
+  `docs/src/cli-reference.md#threat-model`.
 - `file://` `list` with Unix shell glob semantics (#10). The path
   component of a `file://` URL may now contain `*`, `**`, `?`, and
   `[...]` patterns; `hasp list 'file:///etc/secrets/**/*.key'` lists

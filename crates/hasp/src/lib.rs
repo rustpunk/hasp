@@ -31,6 +31,8 @@
 //! Backends wrap raw bytes at the earliest possible moment so `Debug`
 //! output never leaks secret values.
 
+#[cfg(unix)]
+pub use hasp_core::SyslogSink;
 pub use hasp_core::{
     apply_mitigations, check_refusal_conditions, harden_process, scheme_from_url, AuditEvent,
     AuditSink, Backend as BackendTrait, BackendFailureKind, Entry, Error, ExposeSecret, FileSink,

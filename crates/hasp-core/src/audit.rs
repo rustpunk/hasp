@@ -234,6 +234,96 @@ impl AuditSink for FileSink {
     }
 }
 
+/// Forwards each event to the local syslog daemon via `libc::syslog`.
+///
+/// Unix-only (`#[cfg(unix)]`) — Windows has no syslog equivalent
+/// (`Event Log` / ETW are a different API surface). Windows callers
+/// should use [`FileSink`] and ship the file to whatever ingest the
+/// host runs.
+///
+/// Each call to `emit` invokes `libc::syslog(priority, "%s\0", line)`
+/// where `priority` is `LOG_INFO | LOG_USER` (configurable on
+/// construction). The libc client takes care of socket-path
+/// portability (`/dev/log` on Linux, `/var/run/syslog` on macOS) and
+/// RFC3164/5424 framing — we don't reimplement either.
+///
+/// `openlog` is called once on construction with the passed `ident`
+/// (typically `"hasp"`); the syslog connection persists for the
+/// lifetime of the sink. `closelog` is called on drop.
+#[cfg(unix)]
+#[derive(Debug)]
+pub struct SyslogSink {
+    /// Held for the lifetime of the sink so the C string passed to
+    /// `openlog` outlives the syslog connection. `openlog` does NOT
+    /// copy its `ident` argument; dropping the storage early would
+    /// dangle the pointer the syslog client retains.
+    _ident: std::ffi::CString,
+    priority: i32,
+}
+
+#[cfg(unix)]
+impl SyslogSink {
+    /// Open a syslog connection with `ident` (program name shown in
+    /// log entries) and the default `LOG_INFO | LOG_USER` priority.
+    ///
+    /// Returns `Err` only if `ident` contains an interior NUL. The
+    /// underlying `openlog(3)` is infallible — it does not perform
+    /// I/O until the first `syslog(3)` call.
+    pub fn open(ident: &str) -> io::Result<Self> {
+        let cstr = std::ffi::CString::new(ident).map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("syslog ident contains NUL: {e}"),
+            )
+        })?;
+        // SAFETY: `openlog` reads its `ident` argument by pointer for
+        // the life of the connection; we keep `cstr` owned in the
+        // returned struct so the pointer stays valid until `closelog`.
+        // `option = 0` and `facility = LOG_USER` are POSIX-defined
+        // constants, safe in any process state.
+        unsafe {
+            libc::openlog(cstr.as_ptr(), 0, libc::LOG_USER);
+        }
+        Ok(Self {
+            _ident: cstr,
+            priority: libc::LOG_INFO | libc::LOG_USER,
+        })
+    }
+}
+
+#[cfg(unix)]
+impl AuditSink for SyslogSink {
+    fn emit(&self, event: &AuditEvent) {
+        let line = event.to_json_line();
+        // libc::syslog expects a NUL-terminated C string. Constructing
+        // a CString allocates; that's acceptable on the audit path
+        // (one allocation per event, off the hot secret-fetch path).
+        // If the line contains an interior NUL (it can't, JSON has no
+        // NUL bytes by construction) the emit silently drops.
+        if let Ok(c) = std::ffi::CString::new(line) {
+            // SAFETY: priority is a valid combined facility|level
+            // bitmask; format is the literal "%s\0" with one
+            // matching `*const c_char` argument; `c.as_ptr()` is
+            // valid for the duration of the call. No interior NUL
+            // (CString::new enforces).
+            unsafe {
+                libc::syslog(self.priority, c"%s".as_ptr(), c.as_ptr());
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for SyslogSink {
+    fn drop(&mut self) {
+        // SAFETY: closelog is infallible and idempotent; safe to call
+        // even if openlog was never invoked.
+        unsafe {
+            libc::closelog();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -316,5 +406,27 @@ mod tests {
         let _sink = FileSink::open(&path).unwrap();
         let mode = std::fs::metadata(&path).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn syslog_sink_constructs_and_emits_without_panic() {
+        // We cannot assert that syslogd actually received the message
+        // (no portable way to read the local syslog from a unit test
+        // without depending on the daemon being configured). What we
+        // can assert: openlog/syslog/closelog do not panic, and the
+        // sink is object-safe behind `Arc<dyn AuditSink>`. If syslogd
+        // is absent the libc client silently drops — that is the
+        // documented degrade behavior.
+        let sink: Arc<dyn AuditSink> = Arc::new(SyslogSink::open("hasp-test").expect("openlog"));
+        sink.emit(&AuditEvent::start(Verb::Get, "env"));
+        sink.emit(&AuditEvent::done(Verb::Get, "env", "ok"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn syslog_sink_rejects_ident_with_interior_nul() {
+        let err = SyslogSink::open("hasp\0bad").unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
     }
 }

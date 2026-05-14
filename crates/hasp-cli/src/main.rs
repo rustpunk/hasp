@@ -4,6 +4,7 @@ use secrecy::ExposeSecret;
 use std::io::{self, IsTerminal, Read, Write};
 use std::sync::Arc;
 
+mod audit_config;
 mod completions;
 mod config_init;
 mod list_format;
@@ -575,27 +576,19 @@ fn profile_environment(address: &str, profiles: &profiles::Profiles) -> Option<S
 
 /// Build the [`hasp::AuditSink`] for this CLI invocation.
 ///
-/// Defaults to [`hasp::StderrSink`] so every verb emits the same
-/// one-line JSON stream `cp` already produces. Disabled with
-/// `HASP_AUDIT=off`; redirected to a file with `HASP_AUDIT=file` plus
-/// `HASP_AUDIT_PATH=<path>`. A file path that fails to open silently
-/// falls back to [`hasp::NoopSink`] — audit must never poison a verb.
+/// Resolution layers (highest precedence first):
+/// 1. `HASP_AUDIT` env var (`off` / `file` / `syslog` / `stderr`),
+///    refined by `HASP_AUDIT_PATH` (file mode) and `HASP_AUDIT_IDENT`
+///    (syslog mode).
+/// 2. `audit.toml` `[audit]` section, located via
+///    `HASP_AUDIT_CONFIG_PATH` or `~/.config/hasp/audit.toml`.
+/// 3. Default: [`hasp::StderrSink`].
+///
+/// File-open failures, syslog-open failures, and unknown sink labels
+/// degrade to safe defaults — audit must never poison a verb's
+/// result. See [`audit_config`] for the full table.
 fn resolve_audit_sink() -> Arc<dyn hasp::AuditSink> {
-    let mode = std::env::var("HASP_AUDIT").unwrap_or_default();
-    match mode.as_str() {
-        "off" | "none" | "noop" => Arc::new(hasp::NoopSink),
-        "file" => {
-            let path = std::env::var("HASP_AUDIT_PATH").unwrap_or_default();
-            if path.is_empty() {
-                return Arc::new(hasp::StderrSink);
-            }
-            match hasp::FileSink::open(&path) {
-                Ok(s) => Arc::new(s),
-                Err(_) => Arc::new(hasp::NoopSink),
-            }
-        }
-        _ => Arc::new(hasp::StderrSink),
-    }
+    audit_config::AuditConfig::resolve().into_sink()
 }
 
 /// CLI exit-code mapping for library errors. Exit codes are CLI policy,

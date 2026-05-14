@@ -309,15 +309,44 @@ Fields: `event` (closed set), `ts` (UNIX seconds), `src_scheme`,
 
 ### Controlling the sink
 
+Resolution order (highest precedence first):
+1. `HASP_AUDIT` env var.
+2. `~/.config/hasp/audit.toml` (override location with
+   `HASP_AUDIT_CONFIG_PATH`).
+3. Default: stderr.
+
+Env vars:
+
 | Env var | Value | Behaviour |
 |---|---|---|
-| `HASP_AUDIT` | *(unset)* | Default: stderr |
+| `HASP_AUDIT` | *(unset)* | Use `audit.toml` if present, else stderr |
 | `HASP_AUDIT` | `off` | Suppress all audit output |
+| `HASP_AUDIT` | `stderr` | Write JSON lines to stderr |
 | `HASP_AUDIT` | `file` | Write to `HASP_AUDIT_PATH` (falls back to stderr if path is empty, `NoopSink` if open fails) |
+| `HASP_AUDIT` | `syslog` | Forward to local syslog daemon (Unix only); ident from `HASP_AUDIT_IDENT` (default `"hasp"`). Falls back to stderr on Windows. |
 | `HASP_AUDIT_PATH` | `/path/to/audit.log` | Log file for `file` mode (`0600` on Unix) |
+| `HASP_AUDIT_IDENT` | `"hasp"` | Program ident shown in syslog entries (`syslog` mode) |
+| `HASP_AUDIT_CONFIG_PATH` | `/path/to/audit.toml` | Override the default `audit.toml` location |
+
+Example `~/.config/hasp/audit.toml`:
+
+```toml
+[audit]
+sink = "file"
+path = "/var/log/hasp/audit.log"
+
+# Or:
+# [audit]
+# sink = "syslog"
+# ident = "hasp-prod"
+```
 
 Library consumers: pass an `Arc<dyn hasp::AuditSink>` to
 `StoreBuilder::with_audit_sink(...)` to install a custom sink.
+`SyslogSink` is gated on `#[cfg(unix)]` and wraps the libc syslog
+client (`openlog` / `syslog` / `closelog`) so it picks up the
+platform's native socket path (`/dev/log` on Linux,
+`/var/run/syslog` on macOS) without a third-party dependency.
 
 ### Threat model
 
@@ -352,8 +381,10 @@ Trust boundary:
 |---|---|
 | `HASP_PROFILES_PATH` | Override the default `profiles.toml` path. |
 | `HASP_ALLOW_HTTP_PROXY` | Set to `1` to allow `hasp cp` through a plain-http proxy. |
-| `HASP_AUDIT` | Audit sink mode: unset=stderr, `off`=silent, `file`=log file. |
+| `HASP_AUDIT` | Audit sink mode: unset=stderr (or `audit.toml`), `off`=silent, `file`=log file, `syslog`=local syslog daemon (Unix). |
 | `HASP_AUDIT_PATH` | Path for `HASP_AUDIT=file` mode (append, `0600` on Unix). |
+| `HASP_AUDIT_IDENT` | Program ident for `HASP_AUDIT=syslog` mode (default `"hasp"`). |
+| `HASP_AUDIT_CONFIG_PATH` | Override `~/.config/hasp/audit.toml` location. |
 
 ## Address argument
 

@@ -140,6 +140,83 @@ fn hasp_audit_file_writes_to_path() {
 }
 
 #[test]
+fn audit_toml_routes_to_file_sink() {
+    let _env_lock = ENV_LOCK.lock().unwrap();
+    let _g = EnvGuard::set("HASP_AUDIT_TOML_TEST", "1");
+
+    let dir = tempfile::tempdir().unwrap();
+    let log_path = dir.path().join("audit.log");
+    let cfg_path = dir.path().join("audit.toml");
+    std::fs::write(
+        &cfg_path,
+        format!(
+            "[audit]\nsink = \"file\"\npath = \"{}\"\n",
+            log_path.display()
+        ),
+    )
+    .unwrap();
+
+    let out = hasp()
+        .env("HASP_AUDIT_CONFIG_PATH", &cfg_path)
+        .args(["get", "env://HASP_AUDIT_TOML_TEST"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+
+    // Audit must have gone to the file, not stderr.
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let stderr_events = audit_lines(&stderr);
+    assert!(
+        stderr_events.is_empty(),
+        "expected file sink, got stderr events: {stderr}"
+    );
+
+    let body = std::fs::read_to_string(&log_path).unwrap();
+    let file_events = audit_lines(&body);
+    let names: Vec<&str> = file_events
+        .iter()
+        .filter_map(|e| e.get("event").and_then(|v| v.as_str()))
+        .collect();
+    assert!(names.contains(&"get.start"));
+    assert!(names.contains(&"get.done"));
+}
+
+#[test]
+fn env_var_overrides_audit_toml() {
+    let _env_lock = ENV_LOCK.lock().unwrap();
+    let _g = EnvGuard::set("HASP_AUDIT_OVERRIDE_TEST", "1");
+
+    let dir = tempfile::tempdir().unwrap();
+    let log_path = dir.path().join("audit.log");
+    let cfg_path = dir.path().join("audit.toml");
+    // TOML says: write to file. Env var says: off. Env wins.
+    std::fs::write(
+        &cfg_path,
+        format!(
+            "[audit]\nsink = \"file\"\npath = \"{}\"\n",
+            log_path.display()
+        ),
+    )
+    .unwrap();
+
+    let out = hasp()
+        .env("HASP_AUDIT_CONFIG_PATH", &cfg_path)
+        .env("HASP_AUDIT", "off")
+        .args(["get", "env://HASP_AUDIT_OVERRIDE_TEST"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+
+    // No emission anywhere.
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(audit_lines(&stderr).is_empty(), "stderr leaked: {stderr}");
+    assert!(
+        !log_path.exists() || std::fs::read_to_string(&log_path).unwrap().is_empty(),
+        "file got events despite HASP_AUDIT=off"
+    );
+}
+
+#[test]
 fn hasp_audit_file_open_failure_falls_back_to_noop() {
     let _env_lock = ENV_LOCK.lock().unwrap();
     let _g = EnvGuard::set("HASP_AUDIT_OPEN_FAIL", "1");

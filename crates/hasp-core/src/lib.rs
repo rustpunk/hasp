@@ -15,6 +15,8 @@ pub mod retry;
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_utils;
 
+#[cfg(unix)]
+pub use audit::SyslogSink;
 pub use audit::{AuditEvent, AuditSink, FileSink, NoopSink, StderrSink, Verb};
 pub use error::{BackendFailureKind, Error};
 pub use field::{extract_field, extract_field_from_str};
