@@ -319,6 +319,33 @@ Fields: `event` (closed set), `ts` (UNIX seconds), `src_scheme`,
 Library consumers: pass an `Arc<dyn hasp::AuditSink>` to
 `StoreBuilder::with_audit_sink(...)` to install a custom sink.
 
+### Threat model
+
+The audit stream documents that an access happened — it is not a
+forensic guarantee that one *will* happen for every secret retrieval.
+Trust boundary:
+
+- **Same-uid tampering.** A process running as the same uid as
+  `hasp` can redirect or suppress the audit stream — for example by
+  setting `HASP_AUDIT=off` before invoking `hasp`, by truncating the
+  log file an earlier invocation wrote, or by overwriting the
+  binary. Treat the stream as best-effort telemetry from a
+  cooperating caller, not as a tamper-evident security log. For
+  tamper-evident logging, ship the stream off-host (e.g. syslog
+  forwarding to a write-once collector) or run `hasp` in a
+  privilege-separated environment.
+- **Concurrent writers.** `FileSink` serializes writes via an
+  internal `Mutex<File>`; concurrent invocations of `hasp`
+  writing to the same path will not interleave bytes within a
+  single process but two separate hasp processes appending to the
+  same path may produce events out of timestamp order. Sort by
+  `ts` on ingest.
+- **No value leakage.** `AuditEvent`'s field set is closed
+  (`#[non_exhaustive]`) and every field is either a timestamp, a
+  `&'static str` from a closed set, or a URL scheme. No
+  implementation of `AuditSink` can leak a value or a
+  value-derived length.
+
 ## Environment variables
 
 | Variable | Effect |

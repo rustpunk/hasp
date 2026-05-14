@@ -140,6 +140,37 @@ fn hasp_audit_file_writes_to_path() {
 }
 
 #[test]
+fn hasp_audit_file_open_failure_falls_back_to_noop() {
+    let _env_lock = ENV_LOCK.lock().unwrap();
+    let _g = EnvGuard::set("HASP_AUDIT_OPEN_FAIL", "1");
+
+    // Point HASP_AUDIT_PATH at a directory that does not exist —
+    // `FileSink::open` returns Err; the CLI must degrade to NoopSink
+    // rather than panicking or aborting the verb.
+    let out = hasp()
+        .env("HASP_AUDIT", "file")
+        .env("HASP_AUDIT_PATH", "/nonexistent/dir/audit.log")
+        .args(["get", "env://HASP_AUDIT_OPEN_FAIL"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "get should still succeed when audit sink fails to open: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(stdout.trim_end(), "1");
+    // No audit events should have been emitted to stderr — the
+    // fallback is a true NoopSink, not a silent retry to stderr.
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let events = audit_lines(&stderr);
+    assert!(
+        events.is_empty(),
+        "expected NoopSink fallback, got audit events: {stderr}"
+    );
+}
+
+#[test]
 fn cp_emits_start_and_done_with_dst_scheme() {
     let _env_lock = ENV_LOCK.lock().unwrap();
     let _g = EnvGuard::set("HASP_AUDIT_CP_SRC", "v");

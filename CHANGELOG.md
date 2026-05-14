@@ -33,6 +33,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   proptest in `crates/hasp-core/tests/audit_no_leak.rs` enforces
   this). `Error::kind() -> &'static str` added for stable audit
   classification, replacing the former CLI-only `error_kind` function.
+  Threat-model note (same-uid tamperability) documented in
+  `docs/src/cli-reference.md#threat-model`. **Deferred:** the
+  `SyslogSink` and `audit.toml` config items from the #12 acceptance
+  list. Env-var configuration (`HASP_AUDIT`/`HASP_AUDIT_PATH`)
+  covers the common ops use cases; a TOML-backed sink configuration
+  and a syslog binding land in a follow-up.
 - `file://` `list` with Unix shell glob semantics (#10). The path
   component of a `file://` URL may now contain `*`, `**`, `?`, and
   `[...]` patterns; `hasp list 'file:///etc/secrets/**/*.key'` lists

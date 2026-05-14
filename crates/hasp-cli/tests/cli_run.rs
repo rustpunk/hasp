@@ -65,22 +65,100 @@ fn run_short_circuits_on_missing_secret() {
     let _env_lock = ENV_LOCK.lock().unwrap();
     std::env::remove_var("HASP_RUN_MISSING");
 
+    // Use a fresh tempdir for the sentinel rather than a fixed /tmp
+    // path; the assertion that the child was never spawned is then
+    // independent of any prior test run that may have left a stale
+    // file behind.
+    let dir = tempfile::tempdir().unwrap();
+    let sentinel = dir.path().join("child_should_not_run");
+
     let out = hasp()
         .args([
             "run",
             "-e",
             "X=env://HASP_RUN_MISSING",
             "--",
-            // Sentinel file we expect NOT to be created.
             "/usr/bin/touch",
-            "/tmp/hasp-run-should-not-exist-39f8c2",
+            sentinel.to_str().unwrap(),
         ])
         .output()
         .unwrap();
 
     // exit code 2 = NotFound per the new exit-code table.
     assert_eq!(out.status.code(), Some(2));
-    assert!(!std::path::Path::new("/tmp/hasp-run-should-not-exist-39f8c2").exists());
+    // The sentinel must not have been created — the child must not
+    // have been spawned. (This is the stronger check than just exit
+    // code: even if the exit-code mapping changes, we still know the
+    // child never ran.)
+    assert!(
+        !sentinel.exists(),
+        "child was spawned despite missing secret"
+    );
+
+    // Audit done event must carry outcome=error, error_kind=not_found,
+    // not outcome=child_nonzero (which would mean the child *did* run
+    // and exit non-zero).
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let events: Vec<serde_json::Value> = stderr
+        .lines()
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect();
+    let run_done = events
+        .iter()
+        .find(|e| e.get("event").and_then(|v| v.as_str()) == Some("run.done"))
+        .expect("missing run.done");
+    assert_eq!(
+        run_done.get("outcome").and_then(|v| v.as_str()),
+        Some("error"),
+        "expected run.done outcome=error, got: {run_done:?}"
+    );
+    assert_eq!(
+        run_done.get("error_kind").and_then(|v| v.as_str()),
+        Some("not_found")
+    );
+}
+
+#[test]
+fn run_umbrella_scheme_is_multi_when_schemes_differ() {
+    let _env_lock = ENV_LOCK.lock().unwrap();
+    let _g1 = EnvGuard::set("HASP_RUN_MULTI_A", "a");
+    let dir = tempfile::tempdir().unwrap();
+    let file_path = dir.path().join("b.txt");
+    std::fs::write(&file_path, "b").unwrap();
+    let file_url = url::Url::from_file_path(&file_path).unwrap();
+
+    let out = hasp()
+        .args([
+            "run",
+            "-e",
+            "A=env://HASP_RUN_MULTI_A",
+            "-e",
+            &format!("B={}", file_url.as_str()),
+            "--",
+            "/usr/bin/true",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "hasp run failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let events: Vec<serde_json::Value> = stderr
+        .lines()
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect();
+    let start = events
+        .iter()
+        .find(|e| e.get("event").and_then(|v| v.as_str()) == Some("run.start"))
+        .expect("missing run.start");
+    assert_eq!(
+        start.get("src_scheme").and_then(|v| v.as_str()),
+        Some("multi"),
+        "expected umbrella scheme = 'multi' for mixed -e, got: {start:?}"
+    );
 }
 
 #[test]
