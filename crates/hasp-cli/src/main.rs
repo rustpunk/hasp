@@ -8,6 +8,7 @@ mod audit_config;
 mod completions;
 mod config_init;
 mod list_format;
+mod profile_allow;
 mod profiles;
 mod run;
 use list_format::{format_list, Format};
@@ -37,6 +38,12 @@ struct Cli {
     /// HTTP CONNECT proxy URL.
     #[arg(long, global = true)]
     proxy_url: Option<String>,
+
+    /// Skip the `HASP_REQUIRE_PROFILE_ALLOW` enforcement check for this
+    /// invocation. Useful in CI environments that cannot run
+    /// `hasp profile allow` before each command.
+    #[arg(long, global = true)]
+    no_profile_allow: bool,
 }
 
 #[derive(Subcommand)]
@@ -109,6 +116,27 @@ enum Command {
         #[arg(short, long)]
         yes: bool,
     },
+    /// Compare two secrets across (possibly different) backends.
+    ///
+    /// `diff` is the read-only sibling of `cp`: both URLs are fetched
+    /// and the values are compared in constant time. The mismatch
+    /// reveals nothing beyond the boolean — no byte counts, no common
+    /// prefix, no diff position.
+    ///
+    /// Exit codes: 0 = match, 1 = differ. Backend errors propagate
+    /// through the standard exit-code table (auth=5, transport=4,
+    /// not-found=2, etc.). The 0/1 boolean parallels `hasp exists`.
+    Diff {
+        /// First URL or alias (`@profile/key`).
+        #[arg(value_hint = ValueHint::AnyPath, add = ArgValueCompleter::new(completions::complete_address))]
+        a: String,
+        /// Second URL or alias (`@profile/key`).
+        #[arg(value_hint = ValueHint::AnyPath, add = ArgValueCompleter::new(completions::complete_address))]
+        b: String,
+        /// Confirm cross-environment comparison (e.g., prod vs stage).
+        #[arg(short, long)]
+        yes: bool,
+    },
     /// Run a command with secrets injected as environment variables.
     ///
     /// `hasp run -e KEY=URL [...] -- <cmd> [args...]` resolves each
@@ -135,6 +163,17 @@ enum Command {
         #[arg(long)]
         force: bool,
     },
+    /// Manage profile-file trust (direnv-style allow / show).
+    ///
+    /// Before `hasp` will use profile aliases in an environment where
+    /// `HASP_REQUIRE_PROFILE_ALLOW=1` is set, the operator must run
+    /// `hasp profile allow` to record a trusted baseline. Any subsequent
+    /// modification to `profiles.toml` is detected and rejected until
+    /// `allow` is re-run.
+    Profile {
+        #[command(subcommand)]
+        action: ProfileAction,
+    },
     /// Generate a man page for the `hasp` binary.
     ///
     /// Hidden from help to keep the CLI surface minimal.
@@ -149,6 +188,19 @@ enum Command {
         /// Target shell.
         shell: clap_complete::aot::Shell,
     },
+}
+
+/// Sub-actions for `hasp profile`.
+#[derive(Subcommand)]
+enum ProfileAction {
+    /// Mark the current `profiles.toml` as trusted.
+    ///
+    /// Records the file's mtime and SHA-256 to `profiles.allowed` with
+    /// mode 0600 on Unix. Any future modification to `profiles.toml`
+    /// invalidates the trust; re-run `allow` after reviewing the change.
+    Allow,
+    /// Print the resolved path, mtime, and allowed status.
+    Show,
 }
 
 /// CLI mirror of `hasp::IfExists`.
@@ -212,13 +264,30 @@ pub(crate) const EXIT_PRECONDITION: i32 = 6;
 pub(crate) const EXIT_BACKEND: i32 = 7;
 
 fn run(cli: Cli) -> Result<(), (i32, String)> {
-    // Init does not need profiles or a store.
+    // Init and Profile don't need a store; Profile::Allow also doesn't
+    // need profiles loaded (it writes the allow record, it doesn't read
+    // aliases).
     if let Command::Init { force } = &cli.command {
         return config_init::init(*force).map_err(usage_err);
     }
 
     let profiles = profiles::load_profiles()
         .map_err(|e| usage_err(format!("failed to load profiles: {e}")))?;
+
+    // Profile allow-list enforcement. Active when
+    // `HASP_REQUIRE_PROFILE_ALLOW` is set to a truthy value (`1` or
+    // `true`) AND `--no-profile-allow` is not given. Refuse unless the
+    // current `profiles.toml` has been explicitly marked trusted via
+    // `hasp profile allow`. Truthy-only semantics match the
+    // documented `=1` contract; `=0`, empty, or unset all disable.
+    if is_truthy_env("HASP_REQUIRE_PROFILE_ALLOW")
+        && !matches!(&cli.command, Command::Profile { .. })
+    {
+        if let Some(profiles_path) = profile_allow::profiles_toml_path() {
+            profile_allow::check_profile_allowed(&profiles_path, cli.no_profile_allow)
+                .map_err(|e| usage_err(e.to_string()))?;
+        }
+    }
 
     let proxy = resolve_proxy(&cli, &profiles)?;
     let audit_sink = resolve_audit_sink();
@@ -227,9 +296,10 @@ fn run(cli: Cli) -> Result<(), (i32, String)> {
         .with_audit_sink(audit_sink.clone())
         .build();
 
-    // `cp` consumes `--explain` itself by mapping it to `dry_run`
-    // because both src and dst need resolving — handled in the Cp arm.
-    if cli.explain && !matches!(cli.command, Command::Cp { .. }) {
+    // `cp` and `diff` handle `--explain` in their own arms because
+    // both have two addresses to resolve. Every other verb's dry-run
+    // path lives in this shared branch.
+    if cli.explain && !matches!(cli.command, Command::Cp { .. } | Command::Diff { .. }) {
         let address = command_address(&cli);
         if let Some(addr) = address {
             let mut url = resolve(addr, &profiles)?;
@@ -311,38 +381,7 @@ fn run(cli: Cli) -> Result<(), (i32, String)> {
             // copy is a credible MITM vector. cp doubles the exposure
             // window relative to a back-to-back get+put, so refuse
             // unless the caller has explicitly opted in.
-            // Mirror the full reqwest / AWS-SDK fallback set: HTTPS_PROXY,
-            // HTTP_PROXY, and ALL_PROXY (each in both case-conventions).
-            // Missing any one of these would let a user with the alternate
-            // variable set bypass the cp refusal.
-            const PROXY_ENV_VARS: &[&str] = &[
-                "HTTPS_PROXY",
-                "https_proxy",
-                "HTTP_PROXY",
-                "http_proxy",
-                "ALL_PROXY",
-                "all_proxy",
-            ];
-            for var in PROXY_ENV_VARS {
-                if let Ok(p) = std::env::var(var) {
-                    if p.starts_with("http://")
-                        && std::env::var_os("HASP_ALLOW_HTTP_PROXY").is_none()
-                    {
-                        return Err(precondition_err(format!(
-                            "refusing hasp cp through a plain-http proxy ({p} via {var}); \
-                             set HASP_ALLOW_HTTP_PROXY=1 to override"
-                        )));
-                    }
-                }
-            }
-            if let Some(p) = &cli.proxy_url {
-                if p.starts_with("http://") && std::env::var_os("HASP_ALLOW_HTTP_PROXY").is_none() {
-                    return Err(precondition_err(format!(
-                        "refusing hasp cp through a plain-http proxy ({p}); \
-                         set HASP_ALLOW_HTTP_PROXY=1 to override"
-                    )));
-                }
-            }
+            refuse_plain_http_proxy(cli.proxy_url.as_deref(), "cp")?;
 
             // Cross-environment refusal: when both src and dst are
             // alias-prefixed and their profiles carry an `environment`
@@ -403,6 +442,53 @@ fn run(cli: Cli) -> Result<(), (i32, String)> {
             }
             outcome_result.map_err(cli_error)?;
         }
+        Command::Diff { a, b, yes } => {
+            let a_url = resolve(&a, &profiles)?;
+            let b_url = resolve(&b, &profiles)?;
+
+            // diff fetches both secrets, so a MITM on a plain-http
+            // proxy can still observe them. Apply the same refusal as
+            // cp.
+            refuse_plain_http_proxy(cli.proxy_url.as_deref(), "diff")?;
+
+            // Cross-environment refusal: aliases carrying mismatched
+            // `environment` labels require explicit --yes confirmation,
+            // mirroring `cp`. A diff itself is read-only, but the act
+            // of pulling a prod secret into the same process as a stage
+            // secret is the surprise we want to gate.
+            if !yes {
+                if let (Some(a_env), Some(b_env)) = (
+                    profile_environment(&a, &profiles),
+                    profile_environment(&b, &profiles),
+                ) {
+                    if a_env != b_env {
+                        return Err(precondition_err(format!(
+                            "refusing cross-environment diff: a='{a_env}' b='{b_env}'; \
+                             pass --yes to confirm"
+                        )));
+                    }
+                }
+            }
+
+            if cli.explain && !cli.quiet {
+                eprintln!("URL (a):     {a_url}");
+                eprintln!("URL (b):     {b_url}");
+                eprintln!("Backend a:   {}", scheme_of(&a_url));
+                eprintln!("Backend b:   {}", scheme_of(&b_url));
+                eprintln!("Operation:   diff (dry-run; no read)");
+                return Ok(());
+            }
+
+            let outcome = store.compare(&a_url, &b_url).map_err(cli_error)?;
+            if cli.verbose > 0 && !cli.quiet {
+                eprintln!("hasp: diff {a} vs {b} -> {outcome:?}");
+            }
+            // 0 = match, 1 = differ. Parallels `hasp exists`.
+            std::process::exit(match outcome {
+                hasp::DiffOutcome::Match => EXIT_SUCCESS,
+                hasp::DiffOutcome::Differ => EXIT_USAGE,
+            });
+        }
         Command::Run {
             env,
             allow_tty,
@@ -419,6 +505,26 @@ fn run(cli: Cli) -> Result<(), (i32, String)> {
                 cli.verbose,
             )?;
             std::process::exit(exit);
+        }
+        Command::Profile { action } => {
+            let profiles_path = profile_allow::profiles_toml_path()
+                .ok_or_else(|| usage_err("could not determine config directory".into()))?;
+            match action {
+                ProfileAction::Allow => {
+                    profile_allow::profile_allow(&profiles_path)
+                        .map_err(|e| usage_err(e.to_string()))?;
+                    if !cli.quiet {
+                        eprintln!(
+                            "profiles.toml at {} marked as trusted.",
+                            profiles_path.display()
+                        );
+                    }
+                }
+                ProfileAction::Show => {
+                    profile_allow::profile_show(&profiles_path)
+                        .map_err(|e| usage_err(e.to_string()))?;
+                }
+            }
         }
         Command::Init { force } => {
             config_init::init(force).map_err(usage_err)?;
@@ -518,8 +624,10 @@ fn command_address(cli: &Cli) -> Option<&str> {
         | Command::Delete { address }
         | Command::Exists { address } => Some(address.as_str()),
         Command::Cp { .. }
+        | Command::Diff { .. }
         | Command::Run { .. }
         | Command::Init { .. }
+        | Command::Profile { .. }
         | Command::Man
         | Command::Complete { .. } => None,
     }
@@ -534,8 +642,10 @@ fn command_verb(cli: &Cli) -> &'static str {
         Command::Delete { .. } => "delete",
         Command::Exists { .. } => "exists",
         Command::Cp { .. } => "cp",
+        Command::Diff { .. } => "diff",
         Command::Run { .. } => "run",
         Command::Init { .. } => "init",
+        Command::Profile { .. } => "profile",
         Command::Man => "man",
         Command::Complete { .. } => "complete",
     }
@@ -551,11 +661,17 @@ fn command_addresses(cli: &Cli) -> Vec<&str> {
         Command::Delete { address } => vec![address.as_str()],
         Command::Exists { address } => vec![address.as_str()],
         Command::Cp { src, dst, .. } => vec![src.as_str(), dst.as_str()],
+        Command::Diff { a, b, .. } => vec![a.as_str(), b.as_str()],
         Command::Run { env, .. } => env
             .iter()
             .filter_map(|s| s.split_once('=').map(|(_, v)| v))
             .collect(),
-        Command::Init { .. } | Command::Man | Command::Complete { .. } => vec![],
+        Command::Init { .. }
+        | Command::Profile { .. }
+        | Command::Man
+        | Command::Complete { .. } => {
+            vec![]
+        }
     }
 }
 
@@ -572,6 +688,63 @@ fn profile_environment(address: &str, profiles: &profiles::Profiles) -> Option<S
     let rest = address.strip_prefix('@')?;
     let profile_name = rest.split_once('/').map(|(p, _)| p).unwrap_or(rest);
     profiles.environment(profile_name)
+}
+
+/// Truthy-env predicate. `1` / `true` / `yes` / `on` (case-insensitive)
+/// return true; everything else (including `0`, empty string, unset)
+/// returns false. Avoids the `is_some()` footgun where
+/// `HASP_REQUIRE_PROFILE_ALLOW=0` would enable enforcement.
+fn is_truthy_env(name: &str) -> bool {
+    match std::env::var(name) {
+        Ok(v) => matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        ),
+        Err(_) => false,
+    }
+}
+
+/// Refuse if any well-known proxy env var (or the `--proxy-url` flag)
+/// points at a plain-http endpoint. Used by `cp` and `diff`: a MITM on
+/// the proxy can observe values fetched through it.
+///
+/// `verb` appears in the user-facing refusal so the message names the
+/// operation that's being blocked. The flag is passed in by reference
+/// rather than reading from `&Cli` because callers have typically
+/// partially-moved out of the Cli enum's command field via match
+/// destructuring.
+fn refuse_plain_http_proxy(flag_proxy_url: Option<&str>, verb: &str) -> Result<(), (i32, String)> {
+    // Mirror the reqwest / AWS-SDK fallback set: HTTPS_PROXY, HTTP_PROXY,
+    // and ALL_PROXY (each in both case-conventions). Missing any one of
+    // these would let a user with the alternate variable set bypass the
+    // refusal.
+    const PROXY_ENV_VARS: &[&str] = &[
+        "HTTPS_PROXY",
+        "https_proxy",
+        "HTTP_PROXY",
+        "http_proxy",
+        "ALL_PROXY",
+        "all_proxy",
+    ];
+    for var in PROXY_ENV_VARS {
+        if let Ok(p) = std::env::var(var) {
+            if p.starts_with("http://") && std::env::var_os("HASP_ALLOW_HTTP_PROXY").is_none() {
+                return Err(precondition_err(format!(
+                    "refusing hasp {verb} through a plain-http proxy ({p} via {var}); \
+                     set HASP_ALLOW_HTTP_PROXY=1 to override"
+                )));
+            }
+        }
+    }
+    if let Some(p) = flag_proxy_url {
+        if p.starts_with("http://") && std::env::var_os("HASP_ALLOW_HTTP_PROXY").is_none() {
+            return Err(precondition_err(format!(
+                "refusing hasp {verb} through a plain-http proxy ({p}); \
+                 set HASP_ALLOW_HTTP_PROXY=1 to override"
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Build the [`hasp::AuditSink`] for this CLI invocation.

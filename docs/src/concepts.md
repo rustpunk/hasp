@@ -239,6 +239,23 @@ db = "aws-sm://us-east-1/stage/db-password"
 See [CLI Reference: `hasp cp`](cli-reference.md#hasp-cp-src-dst) for
 the full flag set and security model.
 
+## Drift detection with `diff`
+
+`hasp diff` is the read-only sibling of `cp`: it answers the
+"did staging and prod drift?" question without printing either value.
+
+```bash
+hasp diff @stage/db @prod/db                  # exits 0 on match, 1 on differ
+hasp diff aws-sm://us-east-1/api vault://kv/data/api?field=token
+```
+
+The verdict is binary by construction — `match` or `differ`. A mismatch
+reveals no byte counts, common prefixes, or hashes; the compare path
+uses constant-time equality so timing channels are not informative
+either. Cross-environment refusal and plain-http proxy refusal mirror
+`cp`. See [CLI Reference: `hasp diff`](cli-reference.md#hasp-diff-a-b)
+for the full flag set.
+
 ## Where to next
 
 - [Profile Aliases](profiles.md) — alias resolution rules, config

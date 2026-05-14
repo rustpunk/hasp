@@ -16,7 +16,9 @@
 //!
 //! Supported operations: `get`, `put`, `exists`, `delete`, `list`.
 
-use hasp_core::{Backend, BackendFailureKind, Entry, Error, ExposeSecret, SecretString};
+use hasp_core::{
+    secret_mem::wrap_secret, Backend, BackendFailureKind, Entry, Error, ExposeSecret, SecretString,
+};
 use std::path::PathBuf;
 use url::Url;
 
@@ -115,7 +117,7 @@ impl Backend for FileBackend {
         if !file_url.raw {
             trim_one_trailing_newline(&mut contents);
         }
-        Ok(SecretString::new(contents.into()))
+        Ok(wrap_secret(contents))
     }
 
     fn put(&self, url: &Url, value: &SecretString) -> Result<(), Error> {

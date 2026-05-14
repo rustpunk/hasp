@@ -181,6 +181,28 @@ If `mlock` on Linux daemons is worth a Cargo feature even though it adds compile
 - **`memory-lock` as default (Approach B always-on):** rejected because the Linux 64 KB `RLIMIT_MEMLOCK` default would be exhausted by ~250 cached secrets, the per-platform parity is poor, and the cost is wasted on short-lived CLI invocations. Off-by-default is the right posture; long-lived embedders opt in.
 - **Pulling `zeroize` as a top-level dep at a pinned version different from `secrecy`'s selection:** rejected per RUSTSEC-2024-0342 — version skew between the two has caused silent zeroize disabling in production.
 
+## Implementation notes (added 2026-05-14)
+
+The `memory-lock` feature shipped as part of sprint #9. Key decisions:
+
+**No new crate.** `region`, `memsec`, and `os-memlock` were evaluated.
+`region` was last pushed June 2024 (borderline 12-month window); `os-memlock`'s
+GitHub repo did not resolve. Implemented directly via `libc` (mlock, madvise)
+and `windows-sys` (VirtualLock) — both already in the workspace, zero crate
+audit surface added.
+
+**Crate decision: none.** Direct libc/windows-sys calls, same pattern as
+existing `hardening.rs` platform modules.
+
+**Backends migrated.** `env://` and `file://` backends now call `wrap_secret()`
+from `hasp_core::secret_mem`, which invokes `lock_secret_pages` when the feature
+is active. Other backends retain `SecretString::new(...)` for now and can
+migrate incrementally.
+
+**Graceful degrade.** mlock failure returns `MitigationOutcome { applied: false }`
+and the secret is usable. CI matrix tests with `--features hasp-core/memory-lock`
+on Linux where RLIMIT_MEMLOCK may be 64 KiB.
+
 ---
 
 ## Bibliography

@@ -25,10 +25,27 @@ const SECRET_SENTINEL: &str = "AKIAIOSFODNN7EXAMPLE";
 // UTF-8 to exercise serde_json's escape machinery.
 const WIDE_SCHEME: &str = r#"[\x20-\x7e]{0,32}"#;
 
+// Every Verb. Keep this list in sync with `hasp_core::audit::Verb` —
+// the test_utils crate would let us derive it, but the closed enum
+// makes a hand-maintained list cheap and surfaces additions during
+// review.
+fn any_verb() -> impl Strategy<Value = Verb> {
+    prop::sample::select(vec![
+        Verb::Get,
+        Verb::Put,
+        Verb::List,
+        Verb::Delete,
+        Verb::Exists,
+        Verb::Cp,
+        Verb::Run,
+        Verb::Diff,
+    ])
+}
+
 proptest! {
     #[test]
-    fn start_event_never_contains_secret_value(scheme in WIDE_SCHEME) {
-        let ev = AuditEvent::start(Verb::Get, scheme);
+    fn start_event_never_contains_secret_value(scheme in WIDE_SCHEME, verb in any_verb()) {
+        let ev = AuditEvent::start(verb, scheme);
         let json = ev.to_json_line();
         prop_assert!(!json.contains(SECRET_SENTINEL),
             "audit JSON unexpectedly contained sentinel: {json}");
@@ -42,10 +59,11 @@ proptest! {
     fn done_event_never_contains_secret_value(
         scheme in WIDE_SCHEME,
         dst_scheme in WIDE_SCHEME,
-        outcome in prop::sample::select(vec!["ok", "error", "copied", "skipped", "dry_run", "present", "absent", "child_nonzero"]),
+        verb in any_verb(),
+        outcome in prop::sample::select(vec!["ok", "error", "copied", "skipped", "dry_run", "present", "absent", "child_nonzero", "match", "differ"]),
         error_kind in prop::sample::select(vec!["url_parse", "invalid_url", "not_found", "permission_denied", "auth_failed", "precondition_failed", "backend", "other", "unknown_scheme", "unsupported_operation"]),
     ) {
-        let ev = AuditEvent::done(Verb::Cp, scheme, outcome)
+        let ev = AuditEvent::done(verb, scheme, outcome)
             .with_dst_scheme(dst_scheme)
             .with_error_kind(error_kind);
         let json = ev.to_json_line();

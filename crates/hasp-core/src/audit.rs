@@ -30,6 +30,7 @@ pub enum Verb {
     Exists,
     Cp,
     Run,
+    Diff,
 }
 
 impl Verb {
@@ -43,6 +44,7 @@ impl Verb {
             Verb::Exists => "exists.start",
             Verb::Cp => "cp.start",
             Verb::Run => "run.start",
+            Verb::Diff => "diff.start",
         }
     }
 
@@ -56,6 +58,7 @@ impl Verb {
             Verb::Exists => "exists.done",
             Verb::Cp => "cp.done",
             Verb::Run => "run.done",
+            Verb::Diff => "diff.done",
         }
     }
 }
@@ -352,6 +355,7 @@ mod tests {
             Verb::Exists,
             Verb::Cp,
             Verb::Run,
+            Verb::Diff,
         ] {
             assert!(v.start_label().ends_with(".start"));
             assert!(v.done_label().ends_with(".done"));
