@@ -9,6 +9,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `hasp run -e KEY=URL [...] -- <cmd>` subprocess env injection (#2).
+  Resolves each `KEY=URL` pair through `Store::get`, exports the
+  values as environment variables, and execs the command, preserving
+  the child's exit code verbatim. All-or-nothing: a missing secret
+  short-circuits before the child is spawned. Duplicate `-e` keys are
+  refused at startup. Stdout-is-TTY refusal by default prevents
+  accidental echo of injected secrets to scroll buffers; bypass with
+  `--allow-tty`. Emits `run.start` / `run.done` audit events.
+  Threat note: `/proc/<pid>/environ` is same-uid readable on Linux —
+  the fundamental cost of env injection; documented in
+  `docs/src/cli-reference.md#run`. PTY masking deferred.
+- `hasp_core::audit`: `AuditSink` trait + `AuditEvent` struct (#12).
+  Every `Store` verb now emits `*.start` / `*.done` structured
+  one-line JSON events to the configured `AuditSink`. Built-in sinks:
+  `StderrSink` (default, preserves existing `cp` behavior), `FileSink`
+  (append, `0600` on Unix), `NoopSink` (silent). CLI sink is
+  configured via `HASP_AUDIT` / `HASP_AUDIT_PATH`. The sink is
+  installed at CLI startup via `StoreBuilder::with_audit_sink`.
+  Security invariant: `AuditEvent` is `#[non_exhaustive]` with only
+  `'static` classifier strings and a timestamp — values, lengths, and
+  value-derived material cannot appear in any serialized event (a
+  proptest in `crates/hasp-core/tests/audit_no_leak.rs` enforces
+  this). `Error::kind() -> &'static str` added for stable audit
+  classification, replacing the former CLI-only `error_kind` function.
+- `file://` `list` with Unix shell glob semantics (#10). The path
+  component of a `file://` URL may now contain `*`, `**`, `?`, and
+  `[...]` patterns; `hasp list 'file:///etc/secrets/**/*.key'` lists
+  all matching regular files. Symlink traversal and dotfile inclusion
+  are both off by default; opt in with `?follow_symlinks=1` and
+  `?hidden=1`. Only regular files are emitted; every returned entry
+  URL is `get`-able. Depends on `glob = "0.3"` (rust-lang/glob, zero
+  advisories, MIT OR Apache-2.0).
+
+### Changed
+
+- Audit events for `cp.start` / `cp.done` are now emitted by
+  `Store::copy` (library side) rather than the CLI. The wire format
+  and field set are identical; the only behavioral difference is that
+  library consumers using `StoreBuilder::with_audit_sink` now receive
+  `cp` events for free. **Soft behavioral change:** `cp.start` now
+  appears after the `--explain` plan lines instead of before (previous
+  order was undocumented). Scripts parsing `cp.start` events in order
+  relative to the plan lines should be updated.
+- All verbs (`get`, `put`, `list`, `delete`, `exists`, `cp`) emit
+  `*.start` / `*.done` audit events to stderr by default. **Soft
+  breaking change:** scripts that grep stderr will now see new JSON
+  lines for verbs other than `cp`. Suppress with `HASP_AUDIT=off`.
+
+### Dependencies
+
+- `glob = "0.3"` — Unix shell glob matching for `file://` list.
+  Vetted: rust-lang/glob, zero RustSec advisories, MIT OR Apache-2.0.
+
 - SLSA v1.0 build provenance attestations for every release artifact,
   signed via GitHub OIDC and sigstore. The release workflow now runs
   `actions/attest-build-provenance@v1` per matrix target and publishes

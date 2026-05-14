@@ -5,6 +5,7 @@
 //! It intentionally has no profile, TTY, or config dependencies —
 //! those live in `hasp-cli`.
 
+pub mod audit;
 pub mod error;
 pub mod field;
 pub mod hardening;
@@ -14,6 +15,7 @@ pub mod retry;
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_utils;
 
+pub use audit::{AuditEvent, AuditSink, FileSink, NoopSink, StderrSink, Verb};
 pub use error::{BackendFailureKind, Error};
 pub use field::{extract_field, extract_field_from_str};
 pub use hardening::{

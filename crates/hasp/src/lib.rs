@@ -32,9 +32,10 @@
 //! output never leaks secret values.
 
 pub use hasp_core::{
-    apply_mitigations, check_refusal_conditions, harden_process, scheme_from_url,
-    Backend as BackendTrait, BackendFailureKind, Entry, Error, ExposeSecret, HardenRefusal,
-    MitigationOutcome, ProxyConfig, RetryBackend, SecretString,
+    apply_mitigations, check_refusal_conditions, harden_process, scheme_from_url, AuditEvent,
+    AuditSink, Backend as BackendTrait, BackendFailureKind, Entry, Error, ExposeSecret, FileSink,
+    HardenRefusal, MitigationOutcome, NoopSink, ProxyConfig, RetryBackend, SecretString,
+    StderrSink, Verb,
 };
 
 #[cfg(feature = "aws-sm")]
@@ -151,6 +152,7 @@ pub struct StoreBuilder {
     extra_backends: Vec<Backend>,
     ttl: Option<Duration>,
     retry: Option<(u32, Duration)>,
+    audit_sink: Option<Arc<dyn AuditSink>>,
 }
 
 impl StoreBuilder {
@@ -162,6 +164,7 @@ impl StoreBuilder {
             extra_backends: Vec::new(),
             ttl: None,
             retry: None,
+            audit_sink: None,
         }
     }
 
@@ -174,6 +177,7 @@ impl StoreBuilder {
             extra_backends: Vec::new(),
             ttl: None,
             retry: None,
+            audit_sink: None,
         }
     }
 
@@ -206,10 +210,22 @@ impl StoreBuilder {
         self
     }
 
+    /// Install an [`AuditSink`] that receives structured start/done
+    /// events from every `Store` verb.
+    ///
+    /// Events are value-free by construction (see
+    /// [`hasp_core::audit`]). If unset, the store emits no audit
+    /// events — equivalent to a [`NoopSink`].
+    pub fn with_audit_sink(mut self, sink: Arc<dyn AuditSink>) -> Self {
+        self.audit_sink = Some(sink);
+        self
+    }
+
     /// Build the final [`Store`].
     pub fn build(self) -> Store {
         let mut store = Store::empty();
         store.ttl = self.ttl;
+        store.audit_sink = self.audit_sink;
 
         if self.defaults {
             register_default_backends(&mut store, &self.proxy, self.retry);
@@ -280,6 +296,7 @@ pub struct Store {
     backends: HashMap<&'static str, Backend>,
     cache: RwLock<HashMap<String, CacheEntry>>,
     ttl: Option<Duration>,
+    audit_sink: Option<Arc<dyn AuditSink>>,
 }
 
 impl Store {
@@ -289,7 +306,30 @@ impl Store {
             backends: HashMap::new(),
             cache: RwLock::new(HashMap::new()),
             ttl: None,
+            audit_sink: None,
         }
+    }
+
+    /// Emit an audit event, if an `AuditSink` is installed.
+    fn audit(&self, event: AuditEvent) {
+        if let Some(sink) = &self.audit_sink {
+            sink.emit(&event);
+        }
+    }
+
+    /// Audit-emit a `*.done` event derived from a `Result`.
+    fn audit_done<T>(
+        &self,
+        verb: Verb,
+        scheme: &str,
+        ok_outcome: &'static str,
+        result: &Result<T, Error>,
+    ) {
+        let event = match result {
+            Ok(_) => AuditEvent::done(verb, scheme.to_owned(), ok_outcome),
+            Err(e) => AuditEvent::done(verb, scheme.to_owned(), "error").with_error_kind(e.kind()),
+        };
+        self.audit(event);
     }
 
     /// Create a store with the given backends.
@@ -332,7 +372,18 @@ impl Store {
     ///
     /// Returns `Error::UnknownScheme` if no backend handles the URL's scheme.
     pub fn get(&self, url: &str) -> Result<SecretString, Error> {
-        let parsed_url = Url::parse(url)?;
+        let parsed_url = match Url::parse(url) {
+            Ok(u) => u,
+            Err(e) => return Err(Error::UrlParse(e)),
+        };
+        let scheme = parsed_url.scheme().to_owned();
+        self.audit(AuditEvent::start(Verb::Get, scheme.clone()));
+        let result = self.get_inner(&parsed_url, url);
+        self.audit_done(Verb::Get, &scheme, "ok", &result);
+        result
+    }
+
+    fn get_inner(&self, parsed_url: &Url, url: &str) -> Result<SecretString, Error> {
         let scheme = parsed_url.scheme();
         let backend = self
             .backends
@@ -349,7 +400,7 @@ impl Store {
             }
         }
 
-        let secret = backend.get(&parsed_url)?;
+        let secret = backend.get(parsed_url)?;
 
         if self.ttl.is_some() {
             if let Ok(mut cache) = self.cache.write() {
@@ -404,13 +455,24 @@ impl Store {
     ///
     /// Returns `Error::UnknownScheme` if no backend handles the URL's scheme.
     pub fn put(&self, url: &str, value: &SecretString) -> Result<(), Error> {
-        let parsed_url = Url::parse(url)?;
+        let parsed_url = match Url::parse(url) {
+            Ok(u) => u,
+            Err(e) => return Err(Error::UrlParse(e)),
+        };
+        let scheme = parsed_url.scheme().to_owned();
+        self.audit(AuditEvent::start(Verb::Put, scheme.clone()));
+        let result = self.put_inner(&parsed_url, url, value);
+        self.audit_done(Verb::Put, &scheme, "ok", &result);
+        result
+    }
+
+    fn put_inner(&self, parsed_url: &Url, url: &str, value: &SecretString) -> Result<(), Error> {
         let scheme = parsed_url.scheme();
         let backend = self
             .backends
             .get(scheme)
             .ok_or_else(|| Error::UnknownScheme(scheme.to_owned()))?;
-        backend.put(&parsed_url, value)?;
+        backend.put(parsed_url, value)?;
 
         if self.ttl.is_some() {
             if let Ok(mut cache) = self.cache.write() {
@@ -436,13 +498,24 @@ impl Store {
     ///
     /// Returns `Error::UnknownScheme` if no backend handles the URL's scheme.
     pub fn list(&self, url: &str) -> Result<Vec<Entry>, Error> {
-        let url = Url::parse(url)?;
+        let parsed_url = match Url::parse(url) {
+            Ok(u) => u,
+            Err(e) => return Err(Error::UrlParse(e)),
+        };
+        let scheme = parsed_url.scheme().to_owned();
+        self.audit(AuditEvent::start(Verb::List, scheme.clone()));
+        let result = self.list_inner(&parsed_url);
+        self.audit_done(Verb::List, &scheme, "ok", &result);
+        result
+    }
+
+    fn list_inner(&self, url: &Url) -> Result<Vec<Entry>, Error> {
         let scheme = url.scheme();
         let backend = self
             .backends
             .get(scheme)
             .ok_or_else(|| Error::UnknownScheme(scheme.to_owned()))?;
-        let mut entries = backend.list(&url)?;
+        let mut entries = backend.list(url)?;
 
         let prefix = url.path().trim_start_matches('/').trim_end_matches('/');
         if !prefix.is_empty() {
@@ -462,13 +535,24 @@ impl Store {
     ///
     /// Returns `Error::UnknownScheme` if no backend handles the URL's scheme.
     pub fn delete(&self, url: &str) -> Result<(), Error> {
-        let parsed_url = Url::parse(url)?;
+        let parsed_url = match Url::parse(url) {
+            Ok(u) => u,
+            Err(e) => return Err(Error::UrlParse(e)),
+        };
+        let scheme = parsed_url.scheme().to_owned();
+        self.audit(AuditEvent::start(Verb::Delete, scheme.clone()));
+        let result = self.delete_inner(&parsed_url, url);
+        self.audit_done(Verb::Delete, &scheme, "ok", &result);
+        result
+    }
+
+    fn delete_inner(&self, parsed_url: &Url, url: &str) -> Result<(), Error> {
         let scheme = parsed_url.scheme();
         let backend = self
             .backends
             .get(scheme)
             .ok_or_else(|| Error::UnknownScheme(scheme.to_owned()))?;
-        backend.delete(&parsed_url)?;
+        backend.delete(parsed_url)?;
 
         if self.ttl.is_some() {
             if let Ok(mut cache) = self.cache.write() {
@@ -488,7 +572,29 @@ impl Store {
     ///
     /// Returns `Error::UnknownScheme` if no backend handles the URL's scheme.
     pub fn exists(&self, url: &str) -> Result<bool, Error> {
-        let parsed_url = Url::parse(url)?;
+        let parsed_url = match Url::parse(url) {
+            Ok(u) => u,
+            Err(e) => return Err(Error::UrlParse(e)),
+        };
+        let scheme = parsed_url.scheme().to_owned();
+        self.audit(AuditEvent::start(Verb::Exists, scheme.clone()));
+        let result = self.exists_inner(&parsed_url, url);
+        let outcome = match &result {
+            Ok(true) => "present",
+            Ok(false) => "absent",
+            Err(_) => "error",
+        };
+        let event = match &result {
+            Ok(_) => AuditEvent::done(Verb::Exists, scheme.clone(), outcome),
+            Err(e) => {
+                AuditEvent::done(Verb::Exists, scheme.clone(), outcome).with_error_kind(e.kind())
+            }
+        };
+        self.audit(event);
+        result
+    }
+
+    fn exists_inner(&self, parsed_url: &Url, url: &str) -> Result<bool, Error> {
         let scheme = parsed_url.scheme();
 
         if let Some(ttl) = self.ttl {
@@ -505,7 +611,7 @@ impl Store {
             .backends
             .get(scheme)
             .ok_or_else(|| Error::UnknownScheme(scheme.to_owned()))?;
-        backend.exists(&parsed_url)
+        backend.exists(parsed_url)
     }
 
     /// Fetch multiple secrets by URL, returning per-item results.
@@ -596,8 +702,48 @@ impl Store {
     /// Returns `Error::UnsupportedOperation` when the destination
     /// backend does not implement `put`.
     pub fn copy(&self, src: &str, dst: &str, opts: CopyOptions) -> Result<CopyOutcome, Error> {
-        let src_url = Url::parse(src)?;
-        let dst_url = Url::parse(dst)?;
+        let src_url = match Url::parse(src) {
+            Ok(u) => u,
+            Err(e) => return Err(Error::UrlParse(e)),
+        };
+        let dst_url = match Url::parse(dst) {
+            Ok(u) => u,
+            Err(e) => return Err(Error::UrlParse(e)),
+        };
+        let src_scheme = src_url.scheme().to_owned();
+        let dst_scheme = dst_url.scheme().to_owned();
+        self.audit(
+            AuditEvent::start(Verb::Cp, src_scheme.clone()).with_dst_scheme(dst_scheme.clone()),
+        );
+        let result = self.copy_inner(&src_url, &dst_url, src, dst, &opts);
+        let event = match &result {
+            Ok(o) => {
+                let outcome = if opts.dry_run {
+                    "dry_run"
+                } else if o.copied {
+                    "copied"
+                } else {
+                    "skipped"
+                };
+                AuditEvent::done(Verb::Cp, src_scheme.clone(), outcome)
+                    .with_dst_scheme(dst_scheme.clone())
+            }
+            Err(e) => AuditEvent::done(Verb::Cp, src_scheme.clone(), "error")
+                .with_dst_scheme(dst_scheme.clone())
+                .with_error_kind(e.kind()),
+        };
+        self.audit(event);
+        result
+    }
+
+    fn copy_inner(
+        &self,
+        src_url: &Url,
+        dst_url: &Url,
+        src: &str,
+        dst: &str,
+        opts: &CopyOptions,
+    ) -> Result<CopyOutcome, Error> {
         if src_url.as_str() == dst_url.as_str() {
             return Err(Error::InvalidUrl(
                 "source and destination are identical".into(),

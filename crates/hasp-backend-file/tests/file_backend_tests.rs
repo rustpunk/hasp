@@ -91,17 +91,133 @@ fn exists_returns_false_for_missing() {
 }
 
 #[test]
-fn list_returns_unsupported() {
+fn list_glob_flat_wildcard() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = dir.path().join("a.secret");
+    let b = dir.path().join("b.secret");
+    let c = dir.path().join("c.txt");
+    std::fs::write(&a, "A").unwrap();
+    std::fs::write(&b, "B").unwrap();
+    std::fs::write(&c, "C").unwrap();
+
     let backend = FileBackend;
-    let url = Url::parse("file:///etc/secrets").unwrap();
-    let err = backend.list(&url).unwrap_err();
-    assert!(matches!(
-        err,
-        hasp_core::Error::UnsupportedOperation {
-            scheme: "file",
-            operation: "list",
-        }
-    ));
+    let pattern = format!("{}/*.secret", dir.path().display());
+    let url = Url::parse(&format!("file://{pattern}")).unwrap();
+    let mut entries = backend.list(&url).unwrap();
+    entries.sort_by_key(|e| e.name.clone());
+
+    assert_eq!(entries.len(), 2);
+    assert!(entries[0].name.contains("a.secret"));
+    assert!(entries[1].name.contains("b.secret"));
+}
+
+#[test]
+fn list_glob_recursive_wildcard() {
+    let dir = tempfile::tempdir().unwrap();
+    let sub = dir.path().join("sub");
+    std::fs::create_dir(&sub).unwrap();
+    let a = dir.path().join("top.key");
+    let b = sub.join("nested.key");
+    std::fs::write(&a, "A").unwrap();
+    std::fs::write(&b, "B").unwrap();
+
+    let backend = FileBackend;
+    let pattern = format!("{}/**/*.key", dir.path().display());
+    let url = Url::parse(&format!("file://{pattern}")).unwrap();
+    let mut entries = backend.list(&url).unwrap();
+    entries.sort_by_key(|e| e.name.clone());
+
+    assert_eq!(entries.len(), 2, "expected 2 entries, got {entries:?}");
+}
+
+#[test]
+fn list_glob_no_match_returns_empty() {
+    let dir = tempfile::tempdir().unwrap();
+    let backend = FileBackend;
+    let pattern = format!("{}/*.nomatch", dir.path().display());
+    let url = Url::parse(&format!("file://{pattern}")).unwrap();
+    let entries = backend.list(&url).unwrap();
+    assert!(entries.is_empty());
+}
+
+#[test]
+fn list_glob_excludes_hidden_files_by_default() {
+    let dir = tempfile::tempdir().unwrap();
+    let visible = dir.path().join("visible.txt");
+    let hidden = dir.path().join(".hidden.txt");
+    std::fs::write(&visible, "V").unwrap();
+    std::fs::write(&hidden, "H").unwrap();
+
+    let backend = FileBackend;
+    let pattern = format!("{}/*.txt", dir.path().display());
+    let url = Url::parse(&format!("file://{pattern}")).unwrap();
+    let entries = backend.list(&url).unwrap();
+
+    assert_eq!(entries.len(), 1);
+    assert!(entries[0].name.contains("visible.txt"));
+}
+
+#[test]
+fn list_glob_includes_hidden_files_with_param() {
+    let dir = tempfile::tempdir().unwrap();
+    let visible = dir.path().join("visible.txt");
+    let hidden = dir.path().join(".hidden.txt");
+    std::fs::write(&visible, "V").unwrap();
+    std::fs::write(&hidden, "H").unwrap();
+
+    let backend = FileBackend;
+    // Explicitly pattern-match the hidden file with `?hidden=1`.
+    let pattern = format!("{}/.hidden.txt", dir.path().display());
+    let url = Url::parse(&format!("file://{pattern}?hidden=1")).unwrap();
+    let entries = backend.list(&url).unwrap();
+    assert_eq!(entries.len(), 1);
+    assert!(entries[0].name.contains(".hidden.txt"));
+}
+
+#[test]
+fn list_glob_excludes_symlinks_by_default() {
+    let dir = tempfile::tempdir().unwrap();
+    let real = dir.path().join("real.txt");
+    let link = dir.path().join("link.txt");
+    std::fs::write(&real, "R").unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    #[cfg(not(unix))]
+    std::fs::write(&link, "R").unwrap(); // Windows: just write to skip
+
+    let backend = FileBackend;
+    let pattern = format!("{}/*.txt", dir.path().display());
+    let url = Url::parse(&format!("file://{pattern}")).unwrap();
+    let entries = backend.list(&url).unwrap();
+
+    #[cfg(unix)]
+    {
+        // Only the real file should appear; the symlink is filtered.
+        assert_eq!(entries.len(), 1, "symlink not filtered: {entries:?}");
+        assert!(entries[0].name.contains("real.txt"));
+    }
+    #[cfg(not(unix))]
+    {
+        // No symlink was created above, both are regular files.
+        assert_eq!(entries.len(), 2);
+    }
+}
+
+#[test]
+fn list_entries_are_directly_gettable() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("secret.key");
+    std::fs::write(&path, "value\n").unwrap();
+
+    let backend = FileBackend;
+    let pattern = format!("{}/*.key", dir.path().display());
+    let url = Url::parse(&format!("file://{pattern}")).unwrap();
+    let entries = backend.list(&url).unwrap();
+    assert_eq!(entries.len(), 1);
+
+    // Each Entry URL must be get()-able without error.
+    let fetched = backend.get(&entries[0].url).unwrap();
+    assert_eq!(fetched.expose_secret(), "value");
 }
 
 #[test]

@@ -87,4 +87,27 @@ impl Error {
             }
         )
     }
+
+    /// Stable classifier for use in audit events and exit-code mapping.
+    ///
+    /// The returned label is closed-set — pattern-matchable by SIEMs
+    /// and scripts without parsing the human-readable message. Add a
+    /// new arm here only when adding a new `Error` variant.
+    #[allow(unreachable_patterns)]
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Error::UrlParse(_) => "url_parse",
+            Error::InvalidUrl(_) => "invalid_url",
+            Error::UnknownScheme(_) => "unknown_scheme",
+            Error::UnsupportedOperation { .. } => "unsupported_operation",
+            Error::NotFound(_) => "not_found",
+            Error::PermissionDenied(_) => "permission_denied",
+            Error::AuthenticationFailed(_) => "auth_failed",
+            Error::PreconditionFailed(_) => "precondition_failed",
+            Error::Backend { .. } => "backend",
+            // `Error` is `#[non_exhaustive]`; new variants land here
+            // until the match arm is added above.
+            _ => "other",
+        }
+    }
 }
