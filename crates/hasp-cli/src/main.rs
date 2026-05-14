@@ -576,9 +576,14 @@ fn run(cli: Cli, hardening_token: hasp::HardeningToken) -> Result<(), (i32, Stri
         }
         Command::Cache { action } => match action {
             CacheAction::Clear => {
+                let had_cache = store.has_cache();
                 store.clear_cache();
                 if !cli.quiet {
-                    eprintln!("hasp cache cleared.");
+                    if had_cache {
+                        eprintln!("hasp cache cleared.");
+                    } else {
+                        eprintln!("hasp: no cache to clear (disabled by --no-cache, HASP_NO_CACHE, or CI auto-disable).");
+                    }
                 }
             }
         },

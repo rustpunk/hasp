@@ -313,15 +313,14 @@ impl Backend for OpBackend {
         let reference = format!("op://{}/{}/{}", op_url.vault, op_url.item, op_url.field);
 
         // `op item edit` requires positional `<field>=<value>` and an
-        // existing item. We try edit first; if `op` reports the item
-        // doesn't exist, fall back to `op item create`.
+        // existing item. Try edit first; on NotFound fall back to
+        // `op item create`.
         //
         // Argv exposure: the secret value lives on `op`'s argv for the
         // life of the subprocess. On Linux, `/proc/<pid>/cmdline` is
-        // same-uid readable. This is the documented cost of the
+        // same-uid readable — the documented cost of the
         // `op item edit|create` API surface (no stdin variant for
-        // field values). Document in cli-reference.md; PR description
-        // can flag the deferred mitigation as a follow-up.
+        // field values).
         let assignment = format!("{}={}", op_url.field, value.expose_secret());
 
         let edit_args: [&str; 6] = [
@@ -413,11 +412,10 @@ impl Backend for OpBackend {
 
         let mut entries = Vec::with_capacity(items.len());
         for item in items {
-            // Prefer `id` (UUID, rename-stable) for the URL identity;
-            // fall back to `title` if `id` is missing (fake-bin tests
-            // emit title-only output for simplicity). Document in
-            // cli-reference.md that title-keyed URLs are rename-fragile;
-            // UUID-keyed cache resolution lands as a follow-up.
+            // Cache-key identity: prefer `id` (UUID, rename-stable) for the URL.
+            // When the JSON omits `id` (older `op` versions or fake-bin output
+            // that emits title-only), fall back to title — rename-fragile and
+            // documented in the per-backend README.
             let id = item
                 .get("id")
                 .and_then(|v| v.as_str())
@@ -427,6 +425,24 @@ impl Backend for OpBackend {
                 .and_then(|v| v.as_str())
                 .unwrap_or_else(|| id.unwrap_or("?"));
             let Some(id) = id else { continue };
+
+            // Synthetic URL field defaults to `password`. This is correct for
+            // login items (the dominant 1Password category) but wrong for
+            // documents, secure notes, and API credentials whose primary
+            // value lives in a differently-named field. Consumers piping
+            // `hasp list op://vault | xargs hasp get` will hit `not found`
+            // on those entries — documented in the per-backend README.
+            // The `category` JSON field, when present, is consulted: items
+            // whose category is not `LOGIN` or `PASSWORD` are skipped to
+            // keep the list output addressable by the synthesized URL.
+            let category = item.get("category").and_then(|v| v.as_str());
+            let addressable = match category {
+                None => true, // unknown — keep, fail-open for older `op` JSON
+                Some(c) => matches!(c, "LOGIN" | "PASSWORD"),
+            };
+            if !addressable {
+                continue;
+            }
 
             let entry_url = format!("op://{}/{}/password", list_url.vault, id);
             let parsed = Url::parse(&entry_url).map_err(|e| Error::Backend {

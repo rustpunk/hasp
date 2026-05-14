@@ -421,6 +421,14 @@ impl Store {
         }
     }
 
+    /// Whether this store has a cache layer installed. Used by the CLI
+    /// to phrase the `hasp cache clear` confirmation message
+    /// accurately (no-cache builds get a "no cache to clear" hint
+    /// instead of a misleading "cleared" line).
+    pub fn has_cache(&self) -> bool {
+        self.cache.is_some()
+    }
+
     /// Fetch a secret by URL.
     ///
     /// If the store was configured with a TTL, the result is memoized and

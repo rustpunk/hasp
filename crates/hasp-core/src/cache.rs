@@ -63,14 +63,12 @@ impl CacheKey {
 /// capacity ceiling; capacity-eviction is LRU within moka's segmented
 /// design.
 ///
-/// `Persistent` (gated on the `cache-persistent` Cargo feature) is the
-/// cross-invocation encrypted-file path. Today it is a scaffold:
-/// `CachePolicy::Persistent` accepts the policy struct so binary
-/// builders can wire the CLI and env-var integration, but the actual
-/// on-disk encrypted-file implementation lands as a follow-up. When
-/// `Persistent` is constructed, [`ProcessCache::new`] currently
-/// downgrades silently to `Disabled` and the runtime behaves as
-/// `Disabled` until the follow-up ships.
+/// `Persistent` (gated on the `cache-persistent` Cargo feature) is
+/// reserved for a future cross-invocation encrypted-file path.
+/// Constructing it via [`ProcessCache::new`] currently downgrades to
+/// the in-process `Process` policy with the persistent's TTL and
+/// capacity — the on-disk encrypted-file implementation is not yet
+/// in tree.
 #[derive(Debug, Clone, Default)]
 pub enum CachePolicy {
     #[default]
@@ -83,27 +81,26 @@ pub enum CachePolicy {
     Persistent(PersistentPolicy),
 }
 
-/// Persistent cache configuration.
+/// Persistent cache configuration (scaffold only).
 ///
-/// `ttl` is the per-entry time-to-live; enforced against AWS Secrets
+/// `ttl` is the per-entry time-to-live, clamped against AWS Secrets
 /// Manager Agent's published envelope (300s default, 3600s max, 0
-/// disables persistence and falls back to `Process` semantics for the
-/// in-memory layer).
+/// disables persistence).
 ///
-/// `path` is the encrypted cache file location. Default:
-/// `$XDG_CACHE_HOME/hasp/cache.bin`. File mode `0o600` on Unix.
+/// `path` is the intended encrypted cache file location. Default:
+/// `$XDG_CACHE_HOME/hasp/cache.bin`. File mode `0o600` on Unix when
+/// the implementation lands.
 ///
 /// `keyring_service` and `keyring_account` identify the OS-keyring
 /// entry holding the per-host symmetric key (XChaCha20-Poly1305).
-/// Default service is `"hasp"`; default account is `"cache:{user}@
-/// {hostname}"`.
+/// Default service is `"hasp"`; default account is
+/// `"cache:{user}@{hostname}"`.
 ///
-/// Today this struct is the design pinned in code: the actual
-/// load/save/encrypt path lands in the follow-up issue. Constructing
-/// a `Persistent` policy and passing it to `ProcessCache::new` is
-/// safe — the cache silently downgrades to `Disabled` so the CLI
-/// integration (`HASP_CACHE_TTL`, `hasp cache clear`) ships today
-/// without committing to the half-baked implementation.
+/// The struct currently pins the design in code; constructing it and
+/// passing to [`ProcessCache::new`] is safe but downgrades to the
+/// in-process `Process` policy with the persistent's TTL and
+/// capacity. The on-disk encrypted-file implementation is not yet
+/// in tree.
 #[cfg(feature = "cache-persistent")]
 #[derive(Debug, Clone)]
 pub struct PersistentPolicy {
@@ -203,11 +200,12 @@ impl ProcessCache {
         match policy {
             #[cfg(feature = "cache-persistent")]
             CachePolicy::Persistent(p) => {
-                // Scaffold: the on-disk encrypted-file path lands as a
-                // follow-up. For now, fall back to the in-process
-                // policy with the persistent policy's TTL and capacity
-                // so the CLI integration (env var, `hasp cache clear`)
-                // works end-to-end today against the in-memory layer.
+                // Scaffold downgrade: with the on-disk encrypted-file path
+                // not yet implemented, `Persistent` runs as an in-process
+                // `Process` policy carrying the persistent's TTL and
+                // capacity. CLI integration (`HASP_CACHE_TTL`,
+                // `hasp cache clear`) operates against the in-memory
+                // layer without a behavioral surprise.
                 let process = CachePolicy::Process {
                     ttl: p.ttl,
                     capacity: p.capacity,
@@ -349,6 +347,53 @@ mod tests {
         std::thread::sleep(Duration::from_millis(120));
         cache.run_pending_tasks();
         assert!(cache.get(&key).is_none());
+    }
+
+    /// Capture-only sink for observing cache events from the eviction
+    /// listener under test.
+    #[derive(Default)]
+    struct TestSink {
+        events: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl AuditSink for TestSink {
+        fn emit(&self, event: &AuditEvent) {
+            if let Ok(mut v) = self.events.lock() {
+                v.push(event.event.to_string());
+            }
+        }
+    }
+
+    #[test]
+    fn ttl_expiry_emits_cache_expire_event() {
+        // moka 0.12 sync flavor fires the eviction listener
+        // synchronously on the eviction-causing thread; for time-based
+        // expiry that means a subsequent op or `run_pending_tasks` is
+        // what surfaces the listener invocation. The test sleeps past
+        // the TTL, then drives an op + run_pending_tasks.
+        let sink: Arc<TestSink> = Arc::new(TestSink::default());
+        let policy = CachePolicy::Process {
+            ttl: Duration::from_millis(50),
+            capacity: 16,
+        };
+        let cache = ProcessCache::new(&policy, token(), Some(sink.clone())).unwrap();
+        let key = CacheKey::new("env", "EXPIRE_TEST");
+        cache.insert(
+            key.clone(),
+            Arc::new(SecretString::new("v".to_string().into())),
+        );
+
+        std::thread::sleep(Duration::from_millis(120));
+        // Drive the listener: a subsequent get + run_pending_tasks
+        // forces moka to process the expired entry.
+        let _ = cache.get(&key);
+        cache.run_pending_tasks();
+
+        let events = sink.events.lock().unwrap().clone();
+        assert!(
+            events.iter().any(|e| e == "cache.expire"),
+            "expected a cache.expire event, got {events:?}"
+        );
     }
 
     #[test]
