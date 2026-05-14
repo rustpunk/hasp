@@ -35,6 +35,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   disables caching on hardening refusal).
 - `hasp_core::install()` returning a `HardeningToken` witness type;
   re-exported via `hasp::install_hardening`.
+- `hasp cache clear` CLI subcommand. Drops every in-process cache
+  entry (and, when the `cache-persistent` Cargo feature ships its
+  implementation, will also remove the on-disk encrypted cache file
+  and its OS-keyring-bound key).
+- `cache-persistent` Cargo feature scaffold on `hasp-core` (#8
+  Approach A). Compiles the `CachePolicy::Persistent(PersistentPolicy)`
+  variant so binary builders can wire `HASP_CACHE_TTL` and the
+  `hasp cache clear` subcommand today; the encrypted-file
+  implementation (XChaCha20-Poly1305 + OS-keyring key + UUID-tuple
+  cache keys for `op://`) lands in a follow-up so `hasp-core` stays
+  free of platform-specific keyring dependencies for now. Today,
+  constructing a `Persistent` policy falls back to the in-process
+  policy with the persistent TTL/capacity.
+- `HASP_CACHE_TTL=<seconds>` env var. Overrides the default cache
+  TTL (1..=3600). Values above 3600 clamp to AWS Agent's published
+  1-hour ceiling; `0` disables the cache entirely.
 
 ### Changed
 

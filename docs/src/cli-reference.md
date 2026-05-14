@@ -358,6 +358,47 @@ The cache is disabled when **any** of the following is true:
    May 2026). Auto-disabling defends against the warm-cache exfil
    class without forcing every CI pipeline to remember the flag.
 
+### Configuring the TTL envelope
+
+`HASP_CACHE_TTL=<seconds>` overrides the default cache TTL. Valid
+range: `1..=3600`. Values above 3600 are clamped to AWS Secrets
+Manager Agent's published 1-hour ceiling. `HASP_CACHE_TTL=0` disables
+the cache entirely (equivalent to `--no-cache`).
+
+### Clearing the cache
+
+```
+hasp cache clear
+```
+
+Drops every cached entry within the current invocation. (The in-process
+cache lives only for the current process, so the gesture is primarily
+useful as a no-op exit; once the `cache-persistent` on-disk variant
+ships, the same command will also remove the encrypted cache file and
+the OS-keyring entry holding its symmetric key.)
+
+### Persistent cache (`cache-persistent` Cargo feature, not yet implemented)
+
+The `cache-persistent` Cargo feature is the opt-in cross-invocation
+encrypted-file cache, currently scaffolded only. When the
+implementation lands, the file will be at
+`$XDG_CACHE_HOME/hasp/cache.bin` (mode `0o600`), encrypted with
+XChaCha20-Poly1305 using a per-host symmetric key bound to the OS
+keyring (Secret Service / Keychain / Credential Manager).
+
+The verbatim threat-model warning from the AWS Secrets Manager Agent
+applies and is reproduced here to set expectations:
+
+> *After the secret value is pulled into the cache, any user with
+> access to the compute environment can access the secret from the
+> cache.*
+
+The feature is off by default for a reason: any persistent cache file
+inherits the threat surface that infostealers and supply-chain worms
+target by name (Bitwarden CLI 2026.4.0; Mini Shai-Hulud /
+CanisterWorm, May 2026). Enable only after considering the deployment
+threat model.
+
 ### Cache audit events
 
 Each cache decision emits a structured one-line JSON event via the

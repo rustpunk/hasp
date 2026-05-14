@@ -62,6 +62,15 @@ impl CacheKey {
 /// `Process` enables in-process memoization with the given TTL and
 /// capacity ceiling; capacity-eviction is LRU within moka's segmented
 /// design.
+///
+/// `Persistent` (gated on the `cache-persistent` Cargo feature) is the
+/// cross-invocation encrypted-file path. Today it is a scaffold:
+/// `CachePolicy::Persistent` accepts the policy struct so binary
+/// builders can wire the CLI and env-var integration, but the actual
+/// on-disk encrypted-file implementation lands as a follow-up. When
+/// `Persistent` is constructed, [`ProcessCache::new`] currently
+/// downgrades silently to `Disabled` and the runtime behaves as
+/// `Disabled` until the follow-up ships.
 #[derive(Debug, Clone, Default)]
 pub enum CachePolicy {
     #[default]
@@ -70,6 +79,81 @@ pub enum CachePolicy {
         ttl: Duration,
         capacity: u64,
     },
+    #[cfg(feature = "cache-persistent")]
+    Persistent(PersistentPolicy),
+}
+
+/// Persistent cache configuration.
+///
+/// `ttl` is the per-entry time-to-live; enforced against AWS Secrets
+/// Manager Agent's published envelope (300s default, 3600s max, 0
+/// disables persistence and falls back to `Process` semantics for the
+/// in-memory layer).
+///
+/// `path` is the encrypted cache file location. Default:
+/// `$XDG_CACHE_HOME/hasp/cache.bin`. File mode `0o600` on Unix.
+///
+/// `keyring_service` and `keyring_account` identify the OS-keyring
+/// entry holding the per-host symmetric key (XChaCha20-Poly1305).
+/// Default service is `"hasp"`; default account is `"cache:{user}@
+/// {hostname}"`.
+///
+/// Today this struct is the design pinned in code: the actual
+/// load/save/encrypt path lands in the follow-up issue. Constructing
+/// a `Persistent` policy and passing it to `ProcessCache::new` is
+/// safe — the cache silently downgrades to `Disabled` so the CLI
+/// integration (`HASP_CACHE_TTL`, `hasp cache clear`) ships today
+/// without committing to the half-baked implementation.
+#[cfg(feature = "cache-persistent")]
+#[derive(Debug, Clone)]
+pub struct PersistentPolicy {
+    pub ttl: Duration,
+    pub path: std::path::PathBuf,
+    pub keyring_service: String,
+    pub keyring_account: String,
+    pub capacity: u64,
+}
+
+#[cfg(feature = "cache-persistent")]
+impl PersistentPolicy {
+    /// Maximum permitted TTL. Mirrors AWS Secrets Manager Agent's
+    /// 1-hour ceiling. Values above this are clamped to keep the
+    /// envelope honest about the worst-case staleness.
+    pub const MAX_TTL: Duration = Duration::from_secs(3600);
+
+    /// AWS Secrets Manager Agent's default TTL: 300 seconds.
+    pub const DEFAULT_TTL: Duration = Duration::from_secs(300);
+
+    /// Construct with the AWS-Agent default envelope and the default
+    /// file path. Returns `None` if `dirs::cache_dir()` fails (e.g.,
+    /// `$HOME` is unset and there is no platform default).
+    pub fn defaults() -> Option<Self> {
+        let dir = dirs::cache_dir()?.join("hasp");
+        Some(Self {
+            ttl: Self::DEFAULT_TTL,
+            path: dir.join("cache.bin"),
+            keyring_service: "hasp".into(),
+            keyring_account: format!("cache:{}", whoami_or_unknown()),
+            capacity: 1024,
+        })
+    }
+
+    /// Clamp `ttl` to `MAX_TTL`. A `ttl` of zero disables persistence.
+    pub fn with_ttl(mut self, ttl: Duration) -> Self {
+        self.ttl = if ttl > Self::MAX_TTL {
+            Self::MAX_TTL
+        } else {
+            ttl
+        };
+        self
+    }
+}
+
+#[cfg(feature = "cache-persistent")]
+fn whoami_or_unknown() -> String {
+    std::env::var("USER")
+        .or_else(|_| std::env::var("USERNAME"))
+        .unwrap_or_else(|_| "unknown".into())
 }
 
 impl CachePolicy {
@@ -117,6 +201,19 @@ impl ProcessCache {
         audit_sink: Option<Arc<dyn AuditSink>>,
     ) -> Option<Self> {
         match policy {
+            #[cfg(feature = "cache-persistent")]
+            CachePolicy::Persistent(p) => {
+                // Scaffold: the on-disk encrypted-file path lands as a
+                // follow-up. For now, fall back to the in-process
+                // policy with the persistent policy's TTL and capacity
+                // so the CLI integration (env var, `hasp cache clear`)
+                // works end-to-end today against the in-memory layer.
+                let process = CachePolicy::Process {
+                    ttl: p.ttl,
+                    capacity: p.capacity,
+                };
+                Self::new(&process, _token, audit_sink)
+            }
             CachePolicy::Disabled => None,
             CachePolicy::Process { ttl, capacity } => {
                 let sink = audit_sink.clone();

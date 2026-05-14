@@ -185,6 +185,11 @@ enum Command {
         #[command(subcommand)]
         action: ProfileAction,
     },
+    /// Manage the in-process and (when enabled) on-disk secret cache.
+    Cache {
+        #[command(subcommand)]
+        action: CacheAction,
+    },
     /// Generate a man page for the `hasp` binary.
     ///
     /// Hidden from help to keep the CLI surface minimal.
@@ -199,6 +204,20 @@ enum Command {
         /// Target shell.
         shell: clap_complete::aot::Shell,
     },
+}
+
+/// Sub-actions for `hasp cache`.
+#[derive(Subcommand)]
+enum CacheAction {
+    /// Drop every cached entry.
+    ///
+    /// Today the cache is in-process: clearing it has effect only
+    /// within the current invocation (which exits right after this
+    /// command, so the gesture is a no-op against future invocations).
+    /// When the `cache-persistent` feature is enabled and the
+    /// on-disk cache implementation lands, this also removes the
+    /// encrypted cache file and the OS-keyring entry holding its key.
+    Clear,
 }
 
 /// Sub-actions for `hasp profile`.
@@ -546,6 +565,14 @@ fn run(cli: Cli, hardening_token: hasp::HardeningToken) -> Result<(), (i32, Stri
         Command::Init { force } => {
             config_init::init(force).map_err(usage_err)?;
         }
+        Command::Cache { action } => match action {
+            CacheAction::Clear => {
+                store.clear_cache();
+                if !cli.quiet {
+                    eprintln!("hasp cache cleared.");
+                }
+            }
+        },
         Command::Complete { shell } => {
             let mut app = Cli::command();
             let bin_name = app.get_name().to_string();
@@ -645,6 +672,7 @@ fn command_address(cli: &Cli) -> Option<&str> {
         | Command::Run { .. }
         | Command::Init { .. }
         | Command::Profile { .. }
+        | Command::Cache { .. }
         | Command::Man
         | Command::Complete { .. } => None,
     }
@@ -663,6 +691,7 @@ fn command_verb(cli: &Cli) -> &'static str {
         Command::Run { .. } => "run",
         Command::Init { .. } => "init",
         Command::Profile { .. } => "profile",
+        Command::Cache { .. } => "cache",
         Command::Man => "man",
         Command::Complete { .. } => "complete",
     }
@@ -685,6 +714,7 @@ fn command_addresses(cli: &Cli) -> Vec<&str> {
             .collect(),
         Command::Init { .. }
         | Command::Profile { .. }
+        | Command::Cache { .. }
         | Command::Man
         | Command::Complete { .. } => {
             vec![]
@@ -728,16 +758,35 @@ fn is_truthy_env(name: &str) -> bool {
 ///
 /// 1. `--no-cache` flag (explicit user opt-out).
 /// 2. `HASP_NO_CACHE=1` truthy env var (per-environment opt-out).
-/// 3. Presence of `CI` env var. CI environments are the documented
+/// 3. `HASP_CACHE_TTL=0` env var. AWS Secrets Manager Agent's
+///    `TTL=0 disables` convention.
+/// 4. Presence of `CI` env var. CI environments are the documented
 ///    target surface for credential-cache-targeting supply-chain
 ///    worms (Bitwarden 2026.4.0 / Mini Shai-Hulud / CanisterWorm);
 ///    auto-disabling there defends against the warm-cache class of
 ///    exfil without forcing every CI pipeline to remember the flag.
+///
+/// `HASP_CACHE_TTL=<seconds>` (1..=3600) overrides the default TTL
+/// envelope. Above 3600 the value is clamped to 3600 (AWS Agent's
+/// published 1-hour ceiling). Below 1 is treated as disabled.
 fn resolve_cache_policy(cli: &Cli) -> hasp::CachePolicy {
     if cli.no_cache || is_truthy_env("HASP_NO_CACHE") || std::env::var_os("CI").is_some() {
-        hasp::CachePolicy::Disabled
-    } else {
-        hasp::CachePolicy::process_default()
+        return hasp::CachePolicy::Disabled;
+    }
+
+    match std::env::var("HASP_CACHE_TTL")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+    {
+        Some(0) => hasp::CachePolicy::Disabled,
+        Some(secs) => {
+            let clamped = secs.min(3600);
+            hasp::CachePolicy::Process {
+                ttl: std::time::Duration::from_secs(clamped),
+                capacity: 1024,
+            }
+        }
+        None => hasp::CachePolicy::process_default(),
     }
 }
 
