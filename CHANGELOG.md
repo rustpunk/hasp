@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- SLSA v1.0 build provenance attestations for every release artifact,
+  signed via GitHub OIDC and sigstore. The release workflow now runs
+  `actions/attest-build-provenance@v1` per matrix target and publishes
+  the `.intoto.jsonl` bundle alongside the binary. Verification
+  documented in `docs/src/installation.md` (both `gh attestation
+  verify` and `slsa-verifier verify-artifact`). Defends against the
+  supply-chain class demonstrated by the Bitwarden CLI 2026.4.0 npm
+  compromise.
+- `?field=<path>` URL query parameter on `vault://`, `aws-sm://`,
+  `gcp-sm://`, and `azure-kv://` extracts a single scalar from a
+  JSON-encoded secret payload before the value crosses the
+  `SecretString` boundary. Supports flat keys (`password`) and dotted
+  nested paths (`.credentials.api_key`). CLI sugar: `hasp get -F
+  <path>`. Backed by the new `hasp_core::extract_field` / `extract_field_from_str`
+  helpers, which all four backends share so the contract stays uniform.
+  Vault's existing flat-field extraction is now backed by the same
+  helper and gains dotted-path support.
 - `Store::copy(src, dst, CopyOptions)` and the `hasp cp <src> <dst>`
   CLI subcommand for cross-backend secret migration. Defaults
   `if_exists = Fail` (refuses to clobber, opt-in via `--force` /
@@ -66,6 +83,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- CLI exit codes are now granular: 0 success, 1 usage/local, 2 not-found,
+  3 permission-denied, 4 transport, 5 auth-failed, 6 precondition. `hasp
+  exists` preserves the 0/1 boolean (present/absent), but backend errors
+  during `exists` flow through the standard table. **Soft breaking
+  change** for scripts that grep on a specific non-zero exit code — every
+  prior failure was code 1; now failures fan out into 1–6.
 - `Backend` newtype removed in favor of `pub type Backend = Arc<dyn hasp_core::Backend>`;
   factory functions (`hasp::env()`, `hasp::file()`, etc.) replace enum
   constructors. Breaking change for `0.1.0-alpha` consumers.

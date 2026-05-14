@@ -6,6 +6,7 @@
 //! those live in `hasp-cli`.
 
 pub mod error;
+pub mod field;
 pub mod hardening;
 pub mod proxy;
 pub mod retry;
@@ -14,6 +15,7 @@ pub mod retry;
 pub mod test_utils;
 
 pub use error::{BackendFailureKind, Error};
+pub use field::{extract_field, extract_field_from_str};
 pub use hardening::{
     apply_mitigations, check_refusal_conditions, harden_process, HardenRefusal, MitigationOutcome,
 };

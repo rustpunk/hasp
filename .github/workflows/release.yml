@@ -7,6 +7,12 @@ on:
 
 permissions:
   contents: write
+  # OIDC token + attestations API for SLSA build provenance via
+  # actions/attest-build-provenance. The Bitwarden CLI 2026.4.0 npm
+  # compromise is the standing argument; see
+  # docs/internal/research/RESEARCH-cp-threat-model.md.
+  id-token: write
+  attestations: write
 
 jobs:
   build:
@@ -64,24 +70,37 @@ jobs:
           mkdir dist
           Compress-Archive -Path "target/${{ matrix.target }}/release/hasp.exe" -DestinationPath "dist/${{ matrix.asset }}.zip"
 
+      - name: Resolve packaged artifact path
+        id: pkg
+        shell: bash
+        run: |
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            echo "path=dist/${{ matrix.asset }}.zip" >> "$GITHUB_OUTPUT"
+          else
+            echo "path=dist/${{ matrix.asset }}.tar.gz" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Generate SLSA build provenance
+        id: attest
+        uses: actions/attest-build-provenance@v1
+        with:
+          subject-path: ${{ steps.pkg.outputs.path }}
+
+      - name: Stage attestation alongside artifact
+        shell: bash
+        run: cp "${{ steps.attest.outputs.bundle-path }}" "${{ steps.pkg.outputs.path }}.intoto.jsonl"
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.asset }}
           path: dist/*
 
-      - name: Upload release asset (unix)
-        if: matrix.os != 'windows-latest'
+      - name: Upload release assets
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/${{ matrix.asset }}.tar.gz
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Upload release asset (windows)
-        if: matrix.os == 'windows-latest'
-        uses: softprops/action-gh-release@v2
-        with:
-          files: dist/${{ matrix.asset }}.zip
+          files: |
+            ${{ steps.pkg.outputs.path }}
+            ${{ steps.pkg.outputs.path }}.intoto.jsonl
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

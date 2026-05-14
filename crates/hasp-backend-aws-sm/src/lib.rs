@@ -1,12 +1,16 @@
 //! `aws-sm://` backend for hasp.
 //!
-//! Grammar: `aws-sm://<region>/<secret-name>?version-stage=<stage>&version-id=<id>`
+//! Grammar: `aws-sm://<region>/<secret-name>?version-stage=<stage>&version-id=<id>&field=<path>`
 //!   - `<region>`       — AWS region (host). Must be non-empty.
 //!   - `<secret-name>`  — Secret name or ARN (path). Leading `/` is stripped.
 //!   - `?version-stage` — Optional version stage (e.g. `AWSCURRENT`,
 //!     `AWSPREVIOUS`). Mutually exclusive with `version-id`.
 //!   - `?version-id`    — Optional version UUID. Mutually exclusive with
 //!     `version-stage`.
+//!   - `?field`         — Optional dotted JSON path. When set, the stored
+//!     secret value is parsed as JSON and the named scalar is returned
+//!     (see `hasp_core::extract_field`). Non-JSON payloads fail with
+//!     `InvalidUrl`.
 //!
 //! Supported operations: `get`, `put`, `list`, `delete`, `exists`.
 //!
@@ -36,6 +40,7 @@ pub struct AwsSmUrl {
     pub secret_name: String,
     pub version_stage: Option<String>,
     pub version_id: Option<String>,
+    pub field: Option<String>,
 }
 
 impl TryFrom<&Url> for AwsSmUrl {
@@ -60,11 +65,13 @@ impl TryFrom<&Url> for AwsSmUrl {
 
         let mut version_stage = None;
         let mut version_id = None;
+        let mut field = None;
 
         for (k, v) in url.query_pairs() {
             match k.as_ref() {
                 "version-stage" => version_stage = Some(v.into_owned()),
                 "version-id" => version_id = Some(v.into_owned()),
+                "field" => field = Some(v.into_owned()),
                 _ => {
                     return Err(Error::InvalidUrl(format!(
                         "aws-sm:// unknown query parameter: {k}"
@@ -84,6 +91,7 @@ impl TryFrom<&Url> for AwsSmUrl {
             secret_name,
             version_stage,
             version_id,
+            field,
         })
     }
 }
@@ -231,25 +239,33 @@ async fn get_secret(aws_url: &AwsSmUrl) -> Result<SecretString, Error> {
 
     let output = builder.send().await.map_err(map_get_error)?;
 
-    match output.secret_string {
-        Some(text) => Ok(SecretString::new(text.into())),
+    let text = match output.secret_string {
+        Some(t) => t,
         None => {
             if output.secret_binary.is_some() {
-                Err(Error::Backend {
+                return Err(Error::Backend {
                     scheme: "aws-sm",
                     kind: BackendFailureKind::Permanent,
                     message: "secret contains binary data; aws-sm:// only supports text secrets"
                         .into(),
-                })
-            } else {
-                Err(Error::Backend {
-                    scheme: "aws-sm",
-                    kind: BackendFailureKind::Permanent,
-                    message: "AWS returned a secret with neither text nor binary value".into(),
-                })
+                });
             }
+            return Err(Error::Backend {
+                scheme: "aws-sm",
+                kind: BackendFailureKind::Permanent,
+                message: "AWS returned a secret with neither text nor binary value".into(),
+            });
         }
-    }
+    };
+
+    // Field extraction runs on the parsed JSON before wrapping in
+    // `SecretString` — the parent payload never escapes this function
+    // as a plaintext `String`.
+    let value = match &aws_url.field {
+        Some(path) => hasp_core::extract_field_from_str(&text, path)?,
+        None => text,
+    };
+    Ok(SecretString::new(value.into()))
 }
 
 /// Probe secret existence via `DescribeSecret`.
@@ -557,6 +573,15 @@ mod tests {
         let aws = AwsSmUrl::try_from(&url).unwrap();
         assert_eq!(aws.version_id, Some("abcd-1234-efgh-5678".into()));
         assert_eq!(aws.version_stage, None);
+    }
+
+    #[test]
+    fn parse_valid_url_with_field() {
+        let url = Url::parse("aws-sm://us-east-1/my-secret?field=.creds.password").unwrap();
+        let aws = AwsSmUrl::try_from(&url).unwrap();
+        assert_eq!(aws.field, Some(".creds.password".into()));
+        assert_eq!(aws.version_stage, None);
+        assert_eq!(aws.version_id, None);
     }
 
     #[test]

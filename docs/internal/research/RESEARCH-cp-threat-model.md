@@ -164,7 +164,6 @@ signals; applies best-effort platform mitigations.
 | `memory-lock` cargo feature with `mlock` / `MADV_DONTDUMP` / `MADV_WIPEONFORK` (Linux) / `VirtualLock` (Windows) | `RLIMIT_MEMLOCK` default is 64 KiB on stock Linux; needs careful per-platform error handling and graceful-degrade |
 | macOS notarization + Hardened Runtime + Developer ID signing | Requires Apple Developer cert; ops dependency |
 | Windows Authenticode signing for release binaries | Requires code-signing cert; ops dependency |
-| SLSA v1.0 L2+ provenance via `actions/attest-build-provenance` | The Bitwarden CLI 2026.4.0 npm compromise is the standing argument |
 | direnv-style `hasp profile allow` allow/deny + mtime tracking | Substantial UX surface; separate thread |
 | Identity-drift detection (re-check `sts:GetCallerIdentity`-equivalent per `cp`) | Each backend has a different identity API; substantial implementation |
 | Structured audit-log hook (writers, sinks, configurable fields) | Basic stderr JSON ships now; structured-sink crate is a separate concern |

@@ -1,9 +1,13 @@
 //! `azure-kv://` backend for hasp.
 //!
-//! Grammar: `azure-kv://<vault-name>/<secret-name>?version=<version>`
+//! Grammar: `azure-kv://<vault-name>/<secret-name>?version=<version>&field=<path>`
 //!   - `<vault-name>`  — Azure Key Vault name (host). Must be non-empty.
 //!   - `<secret-name>` — Path segment after the host. Must be non-empty.
 //!   - `?version`      — Optional version string. Defaults to latest (empty).
+//!   - `?field`        — Optional dotted JSON path. When set, the
+//!     stored secret value is parsed as JSON and the named scalar is
+//!     returned (see `hasp_core::extract_field`). Non-JSON payloads
+//!     fail with `InvalidUrl`.
 //!
 //! Supported operations: `get`, `put`, `list`, `delete`, `exists`.
 //!
@@ -28,6 +32,7 @@ pub struct AzureKvUrl {
     pub vault_name: String,
     pub secret_name: String,
     pub version: Option<String>,
+    pub field: Option<String>,
 }
 
 impl TryFrom<&Url> for AzureKvUrl {
@@ -51,9 +56,11 @@ impl TryFrom<&Url> for AzureKvUrl {
         let secret_name = url.path().trim_start_matches('/').to_owned();
 
         let mut version = None;
+        let mut field = None;
         for (k, v) in url.query_pairs() {
             match k.as_ref() {
                 "version" => version = Some(v.into_owned()),
+                "field" => field = Some(v.into_owned()),
                 _ => {
                     return Err(Error::InvalidUrl(format!(
                         "azure-kv:// unknown query parameter: {k}"
@@ -66,6 +73,7 @@ impl TryFrom<&Url> for AzureKvUrl {
             vault_name,
             secret_name,
             version,
+            field,
         })
     }
 }
@@ -249,6 +257,13 @@ impl Backend for AzureKvBackend {
             message: "Azure Key Vault returned a secret without a value field".into(),
         })?;
 
+        // Field extraction runs on the parsed JSON before wrapping in
+        // `SecretString` — the parent payload never escapes this function
+        // as a plaintext `String`.
+        let value = match &kv_url.field {
+            Some(path) => hasp_core::extract_field_from_str(&value, path)?,
+            None => value,
+        };
         Ok(SecretString::new(value.into()))
     }
 
@@ -534,6 +549,7 @@ mod tests {
             vault_name: "my-vault".into(),
             secret_name: "my-secret".into(),
             version: None,
+            field: None,
         };
         let url = backend.build_url(&kv);
         assert_eq!(
@@ -549,12 +565,21 @@ mod tests {
             vault_name: "my-vault".into(),
             secret_name: "my-secret".into(),
             version: Some("v1".into()),
+            field: None,
         };
         let url = backend.build_url(&kv);
         assert_eq!(
             url,
             "https://my-vault.vault.azure.net/secrets/my-secret/v1?api-version=7.5"
         );
+    }
+
+    #[test]
+    fn parse_valid_url_with_field() {
+        let url = Url::parse("azure-kv://my-vault/my-secret?field=.creds.password").unwrap();
+        let kv = AzureKvUrl::try_from(&url).unwrap();
+        assert_eq!(kv.field, Some(".creds.password".into()));
+        assert_eq!(kv.version, None);
     }
 
     #[test]

@@ -22,6 +22,25 @@ Options:
   -h, --help  Print help (see a summary with '-h')
 ```
 
+## Exit codes
+
+`hasp` uses a granular exit-code convention so scripts can distinguish
+failure modes without parsing stderr.
+
+| Code | Meaning |
+|---|---|
+| 0 | Success. |
+| 1 | Usage or local error (bad flags, malformed URL, unknown scheme, unsupported operation, IO error). |
+| 2 | Not found (the URL is well-formed; the secret does not exist). |
+| 3 | Permission denied (the caller's credentials are valid but lack access). |
+| 4 | Transport / network failure (transient or throttled). Retry may help. |
+| 5 | Authentication failed (credentials missing, invalid, or expired). |
+| 6 | Precondition failed (e.g. `cp` cross-environment refusal, plain-http proxy refusal, `--verify` mismatch, `--if-exists=fail` blocked). |
+
+`hasp exists` is a special case: it overloads codes 0 and 1 to mean
+`present` and `absent`. Backend errors during `exists` still flow
+through the table above (auth=5, transport=4, …).
+
 ## `hasp get <address>`
 
 Fetch a secret and print its value to stdout.
@@ -32,9 +51,32 @@ hasp get file:///etc/secrets/db-password
 hasp get @prod/db_password
 ```
 
-- **Exit code:** 0 on success, non-zero on error.
 - **Stdout:** The secret value, verbatim.
 - **Stderr:** Errors, hints, and warnings only.
+- **Exit codes:** See [Exit codes](#exit-codes) above.
+
+### `-F` / `--field <path>` — field extraction
+
+For backends that store JSON payloads (`vault://`, `aws-sm://`,
+`gcp-sm://`, `azure-kv://`), extract a single scalar from the payload
+inside the backend, before the value crosses the `SecretString`
+boundary. Avoids piping plaintext through `jq` (which leaks the parent
+payload via pipe buffers and shell history).
+
+```bash
+hasp get -F password vault://kv/data/app/db
+hasp get -F .credentials.api_key aws-sm://us-east-1/myapp
+hasp get "aws-sm://us-east-1/myapp?field=.credentials.api_key"
+```
+
+- `<path>` accepts both flat keys (`password`) and dotted nested paths
+  (`.credentials.api_key`). Leading `.` is optional.
+- `-F` is sugar for the URL query parameter `?field=<path>`. Both forms
+  on the same invocation are refused (exit code 1).
+- Non-JSON payloads fail with `invalid URL for backend: secret is not
+  JSON`. Missing keys fail with `not found: field '...' not found`
+  (exit code 2). Non-scalar leaves (objects, arrays, null) fail with
+  `invalid URL` (exit code 1).
 
 ### `hasp get --explain <address>`
 
@@ -61,7 +103,6 @@ hasp put file:///tmp/secret       # prompt securely in TTY
   - `address` — URL or alias of the secret.
   - `value` — Value to store. Use `-` for stdin. Omit in a TTY to
     prompt securely via `rpassword`.
-- **Exit code:** 0 on success, non-zero on error.
 
 ## `hasp list <address>`
 
@@ -79,8 +120,6 @@ hasp list --format json vault://127.0.0.1/secret/ | jq '.[].name'
     - `table` — aligned columns, human-readable
     - `json` — compact JSON array of `{"name": "...", "url": "..."}` objects
 - **Output:** Lines of entries, or an empty result when none match.
-- **Exit code:** 0 on success, non-zero if the backend does not
-  support `list`.
 
 ## `hasp delete <address>`
 
@@ -91,8 +130,6 @@ hasp delete file:///tmp/secret
 hasp delete keyring://my-service/admin
 ```
 
-- **Exit code:** 0 on success, non-zero on error.
-
 ## `hasp exists <address>`
 
 Check whether a secret exists.
@@ -101,7 +138,8 @@ Check whether a secret exists.
 hasp exists env://HOME && echo "present" || echo "missing"
 ```
 
-- **Exit code:** 0 if present, 1 if absent, non-zero on error.
+- **Exit code:** 0 if present, 1 if absent. Backend errors (auth,
+  transport, etc.) use the standard table from [Exit codes](#exit-codes).
 
 ## `hasp cp <src> <dst>`
 
@@ -133,8 +171,9 @@ hasp cp --explain @stage/db @prod/db          # dry-run; resolves both
     model" below).
   - `--explain` (global) — Treated as dry-run for `cp`: resolves both
     URLs and prints the plan; does not call `get` or `put`.
-- **Exit code:** 0 on success, non-zero on refusal, error, or
-  precondition failure.
+- **Exit codes:** Refusals (cross-environment, plain-http proxy,
+  self-copy, `--verify` mismatch, `--if-exists=fail` blocked) return
+  code 6 (precondition). See [Exit codes](#exit-codes).
 
 ### Security model
 
@@ -186,8 +225,8 @@ hasp init
 hasp init --force
 ```
 
-- **Exit code:** 0 on success, non-zero if the file already exists and `--force` was not given.
-- **Respects** `HASP_PROFILES_PATH` if set.
+- **Respects** `HASP_PROFILES_PATH` if set. Refuses to overwrite an
+  existing file without `--force` (exit code 1).
 
 ## `hasp complete <shell>`
 

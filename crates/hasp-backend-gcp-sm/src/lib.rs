@@ -1,10 +1,14 @@
 //! `gcp-sm://` backend for hasp.
 //!
-//! Grammar: `gcp-sm://<project-id>/<secret-id>?version=<version>`
+//! Grammar: `gcp-sm://<project-id>/<secret-id>?version=<version>&field=<path>`
 //!   - `<project-id>` — GCP project identifier (host). Must be non-empty.
 //!   - `<secret-id>`  — Secret ID (path). Identifiers must match
 //!     `^[a-zA-Z0-9-_]{1,255}$` per GCP. Leading `/` is stripped.
 //!   - `?version`     — Optional version label. Defaults to `latest`.
+//!   - `?field`       — Optional dotted JSON path. When set, the
+//!     decoded secret value is parsed as JSON and the named scalar is
+//!     returned (see `hasp_core::extract_field`). Non-JSON payloads
+//!     fail with `InvalidUrl`.
 //!
 //! Supported operations: `get`, `put`, `list`, `delete`, `exists`.
 //!
@@ -28,6 +32,7 @@ pub struct GcpSmUrl {
     pub project_id: String,
     pub secret_id: String,
     pub version: String,
+    pub field: Option<String>,
 }
 
 impl TryFrom<&Url> for GcpSmUrl {
@@ -51,10 +56,12 @@ impl TryFrom<&Url> for GcpSmUrl {
         let secret_id = url.path().trim_start_matches('/').to_owned();
 
         let mut version = String::from("latest");
+        let mut field = None;
 
         for (k, v) in url.query_pairs() {
             match k.as_ref() {
                 "version" => version = v.into_owned(),
+                "field" => field = Some(v.into_owned()),
                 _ => {
                     return Err(Error::InvalidUrl(format!(
                         "gcp-sm:// unknown query parameter: {k}"
@@ -67,6 +74,7 @@ impl TryFrom<&Url> for GcpSmUrl {
             project_id,
             secret_id,
             version,
+            field,
         })
     }
 }
@@ -242,7 +250,14 @@ impl Backend for GcpSmBackend {
             message: format!("secret value is not valid UTF-8: {e}"),
         })?;
 
-        Ok(SecretString::new(text.into()))
+        // Field extraction runs on the parsed JSON before wrapping in
+        // `SecretString` — the parent payload never escapes this function
+        // as a plaintext `String`.
+        let value = match &gcp_url.field {
+            Some(path) => hasp_core::extract_field_from_str(&text, path)?,
+            None => text,
+        };
+        Ok(SecretString::new(value.into()))
     }
 
     fn put(&self, url: &Url, value: &SecretString) -> Result<(), Error> {
@@ -568,6 +583,14 @@ mod tests {
         let url = Url::parse("gcp-sm://my-project/my-secret?version=3").unwrap();
         let gcp = GcpSmUrl::try_from(&url).unwrap();
         assert_eq!(gcp.version, "3");
+    }
+
+    #[test]
+    fn parse_valid_url_with_field() {
+        let url = Url::parse("gcp-sm://my-project/my-secret?field=.creds.password").unwrap();
+        let gcp = GcpSmUrl::try_from(&url).unwrap();
+        assert_eq!(gcp.field, Some(".creds.password".into()));
+        assert_eq!(gcp.version, "latest");
     }
 
     #[test]

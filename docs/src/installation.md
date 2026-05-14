@@ -30,6 +30,43 @@ xattr -d com.apple.quarantine /usr/local/bin/hasp
 On Windows, drop `hasp.exe` somewhere on `%PATH%` (or run it from a
 folder you've added to `PATH`).
 
+## Verifying build provenance
+
+Every release artifact is published with a [SLSA v1.0](https://slsa.dev/)
+build attestation signed via GitHub OIDC and sigstore. The attestation
+proves the artifact was produced from a specific commit of
+`github.com/rustpunk/hasp` by the official release workflow — it
+defends against the supply-chain class demonstrated by the Bitwarden CLI
+npm compromise.
+
+The simplest verification is with the GitHub CLI:
+
+```bash
+gh attestation verify hasp-linux-x64.tar.gz \
+  --owner rustpunk
+```
+
+For offline / air-gapped verification, download the `.intoto.jsonl`
+alongside the artifact and use
+[`slsa-verifier`](https://github.com/slsa-framework/slsa-verifier):
+
+```bash
+curl -L -o hasp-linux-x64.tar.gz \
+  https://github.com/rustpunk/hasp/releases/latest/download/hasp-linux-x64.tar.gz
+curl -L -o hasp-linux-x64.tar.gz.intoto.jsonl \
+  https://github.com/rustpunk/hasp/releases/latest/download/hasp-linux-x64.tar.gz.intoto.jsonl
+
+slsa-verifier verify-artifact hasp-linux-x64.tar.gz \
+  --provenance-path hasp-linux-x64.tar.gz.intoto.jsonl \
+  --source-uri github.com/rustpunk/hasp
+```
+
+The attestation establishes **Build L2** in the SLSA terminology: the
+build identity is verifiable, but the build environment is not
+isolated (hosted GitHub runners). It does **not** defend against a
+maintainer account compromise pushing a malicious release tag — that
+class requires SLSA L3 (isolation-of-build), which is deferred.
+
 ## From source
 
 Requires a stable Rust toolchain (install via [rustup](https://rustup.rs/)).
