@@ -44,6 +44,17 @@ struct Cli {
     /// `hasp profile allow` before each command.
     #[arg(long, global = true)]
     no_profile_allow: bool,
+
+    /// Disable the per-invocation in-process secret cache.
+    ///
+    /// By default `hasp` memoizes fetched secrets for the lifetime of
+    /// a single invocation (process lifetime), which eliminates the
+    /// duplicate-URL footgun across batched fetches. Also honored:
+    /// `HASP_NO_CACHE=1` env var, or presence of `CI` (auto-disabled
+    /// in CI environments to defend against credential-cache-targeting
+    /// supply-chain worms — see cli-reference.md#caching).
+    #[arg(long, global = true)]
+    no_cache: bool,
 }
 
 #[derive(Subcommand)]
@@ -231,16 +242,20 @@ fn main() {
     // on injection-style env vars (LD_PRELOAD, DYLD_INSERT_LIBRARIES,
     // …) and setuid configurations; applies best-effort platform
     // mitigations (PR_SET_DUMPABLE, WER suppression, mitigation
-    // policies, dll search-order). Outcomes are silently discarded
-    // here — a future `--verbose-hardening` flag could surface them.
-    if let Err(e) = hasp::harden_process() {
-        eprintln!("hasp: {e}");
-        std::process::exit(EXIT_USAGE);
-    }
+    // policies, dll search-order). The returned token is the witness
+    // that hardening succeeded; it's required to construct the
+    // in-process cache later in `run`.
+    let token = match hasp::install_hardening() {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("hasp: {e}");
+            std::process::exit(EXIT_USAGE);
+        }
+    };
 
     let cli = Cli::parse();
 
-    if let Err((code, msg)) = run(cli) {
+    if let Err((code, msg)) = run(cli, token) {
         eprintln!("{msg}");
         std::process::exit(code);
     }
@@ -263,7 +278,7 @@ pub(crate) const EXIT_PRECONDITION: i32 = 6;
 // returning something unexpected.
 pub(crate) const EXIT_BACKEND: i32 = 7;
 
-fn run(cli: Cli) -> Result<(), (i32, String)> {
+fn run(cli: Cli, hardening_token: hasp::HardeningToken) -> Result<(), (i32, String)> {
     // Init and Profile don't need a store; Profile::Allow also doesn't
     // need profiles loaded (it writes the allow record, it doesn't read
     // aliases).
@@ -291,9 +306,11 @@ fn run(cli: Cli) -> Result<(), (i32, String)> {
 
     let proxy = resolve_proxy(&cli, &profiles)?;
     let audit_sink = resolve_audit_sink();
+    let cache_policy = resolve_cache_policy(&cli);
     let store = hasp::StoreBuilder::with_defaults()
         .proxy(proxy)
         .with_audit_sink(audit_sink.clone())
+        .with_cache_policy(cache_policy, hardening_token)
         .build();
 
     // `cp` and `diff` handle `--explain` in their own arms because
@@ -701,6 +718,26 @@ fn is_truthy_env(name: &str) -> bool {
             "1" | "true" | "yes" | "on"
         ),
         Err(_) => false,
+    }
+}
+
+/// Resolve the cache policy for this invocation.
+///
+/// Default is the per-invocation in-process cache
+/// (`CachePolicy::process_default`, 5-minute TTL). Disabled by:
+///
+/// 1. `--no-cache` flag (explicit user opt-out).
+/// 2. `HASP_NO_CACHE=1` truthy env var (per-environment opt-out).
+/// 3. Presence of `CI` env var. CI environments are the documented
+///    target surface for credential-cache-targeting supply-chain
+///    worms (Bitwarden 2026.4.0 / Mini Shai-Hulud / CanisterWorm);
+///    auto-disabling there defends against the warm-cache class of
+///    exfil without forcing every CI pipeline to remember the flag.
+fn resolve_cache_policy(cli: &Cli) -> hasp::CachePolicy {
+    if cli.no_cache || is_truthy_env("HASP_NO_CACHE") || std::env::var_os("CI").is_some() {
+        hasp::CachePolicy::Disabled
+    } else {
+        hasp::CachePolicy::process_default()
     }
 }
 

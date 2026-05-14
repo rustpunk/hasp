@@ -27,6 +27,11 @@ secrecy = "0.10"
 subtle = "2.6"
 serde_json = { workspace = true }
 tempfile = { version = "3", optional = true }
+# moka: synchronous TTL cache with eviction-listener. The listener fires
+# on Drop, which is the only correct way to zeroize an `Arc<SecretString>`
+# on eviction. Pinned to the `sync` feature only — no async / future
+# integration is needed at this layer.
+moka = { version = "0.12", default-features = false, features = ["sync"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

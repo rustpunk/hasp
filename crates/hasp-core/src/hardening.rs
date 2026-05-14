@@ -120,6 +120,38 @@ pub fn harden_process() -> Result<Vec<MitigationOutcome>, HardenRefusal> {
     Ok(apply_mitigations())
 }
 
+/// Zero-sized witness that hardening has been installed in this process.
+///
+/// Returned by [`install`]; consumed (by value or `Copy`) by APIs that
+/// require process-level hardening as a precondition. The current
+/// consumer is [`crate::cache::CacheBuilder`] — caching cannot be
+/// constructed without a token, which makes the in-process hardening
+/// (`PR_SET_DUMPABLE=0`, `RLIMIT_CORE=0`, env-injection refusal) a
+/// non-bypassable precondition rather than an aspirational one.
+///
+/// The type is intentionally unconstructible outside this module.
+#[derive(Debug, Clone, Copy)]
+pub struct HardeningToken(());
+
+/// Install process-level hardening and return a [`HardeningToken`].
+///
+/// Equivalent to [`harden_process`] for the side-effect path
+/// (`check_refusal_conditions` + `apply_mitigations`), but discards the
+/// per-mitigation outcomes in favor of a witness type. Callers that
+/// need the outcomes for diagnostic logging should use both APIs in
+/// sequence; the underlying syscalls are idempotent.
+///
+/// # Errors
+///
+/// Returns `HardenRefusal` if the process is running setuid or has an
+/// injection-style environment variable set. The caller should map
+/// either to a non-zero exit code before any secret material is loaded.
+pub fn install() -> Result<HardeningToken, HardenRefusal> {
+    check_refusal_conditions()?;
+    apply_mitigations();
+    Ok(HardeningToken(()))
+}
+
 /// Attempt to lock the memory pages backing `bytes` into physical RAM
 /// and configure them so they are excluded from core dumps, process
 /// forks, and crash reports.

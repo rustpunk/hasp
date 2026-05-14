@@ -33,6 +33,30 @@ pub enum Verb {
     Diff,
 }
 
+/// Single-phase cache event classifier. Unlike [`Verb`] these events
+/// have no start/done split — a cache hit is observable in one phase.
+/// The label set is closed at the type level so audit consumers can
+/// switch on it without parsing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CacheEvent {
+    Hit,
+    Miss,
+    Expire,
+    Clear,
+}
+
+impl CacheEvent {
+    /// Stable `&'static str` label for the event.
+    pub fn label(self) -> &'static str {
+        match self {
+            CacheEvent::Hit => "cache.hit",
+            CacheEvent::Miss => "cache.miss",
+            CacheEvent::Expire => "cache.expire",
+            CacheEvent::Clear => "cache.clear",
+        }
+    }
+}
+
 impl Verb {
     /// Static label for the `*.start` event.
     pub fn start_label(self) -> &'static str {
@@ -118,6 +142,28 @@ impl AuditEvent {
     pub fn with_error_kind(mut self, kind: &'static str) -> Self {
         self.error_kind = Some(kind);
         self
+    }
+
+    /// Build a cache event for the given URL scheme. Single-phase —
+    /// the `outcome` field carries the same classifier as `event`
+    /// (e.g., `event = "cache.hit"`, `outcome = "hit"`) so consumers
+    /// that filter on `outcome` see a stable label without parsing
+    /// the `event` prefix.
+    pub fn cache(kind: CacheEvent, scheme: impl Into<String>) -> Self {
+        let outcome: &'static str = match kind {
+            CacheEvent::Hit => "hit",
+            CacheEvent::Miss => "miss",
+            CacheEvent::Expire => "expire",
+            CacheEvent::Clear => "clear",
+        };
+        Self {
+            ts: SystemTime::now(),
+            event: kind.label(),
+            url_scheme: scheme.into(),
+            dst_scheme: None,
+            outcome,
+            error_kind: None,
+        }
     }
 
     /// Render to a single-line JSON string with no trailing newline.

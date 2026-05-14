@@ -6,6 +6,7 @@
 //! those live in `hasp-cli`.
 
 pub mod audit;
+pub mod cache;
 pub mod error;
 pub mod field;
 pub mod hardening;
@@ -18,13 +19,15 @@ pub mod test_utils;
 
 #[cfg(unix)]
 pub use audit::SyslogSink;
-pub use audit::{AuditEvent, AuditSink, FileSink, NoopSink, StderrSink, Verb};
+pub use audit::{AuditEvent, AuditSink, CacheEvent, FileSink, NoopSink, StderrSink, Verb};
+pub use cache::{CacheKey, CachePolicy, ProcessCache};
 pub use error::{BackendFailureKind, Error};
 pub use field::{extract_field, extract_field_from_str};
 #[cfg(feature = "memory-lock")]
 pub use hardening::lock_secret_pages;
 pub use hardening::{
-    apply_mitigations, check_refusal_conditions, harden_process, HardenRefusal, MitigationOutcome,
+    apply_mitigations, check_refusal_conditions, harden_process, install, HardenRefusal,
+    HardeningToken, MitigationOutcome,
 };
 pub use proxy::{is_no_proxy, resolve_proxy_from_env, ProxyConfig};
 pub use retry::RetryBackend;

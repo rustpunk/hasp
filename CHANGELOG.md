@@ -9,6 +9,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Per-invocation in-process secret cache (`hasp_core::cache`) replacing
+  the previous hand-rolled `Store`-level HashMap cache (#8 Approach E).
+  Built on `moka::sync` with an eviction listener that explicitly drops
+  the `Arc<SecretString>` so the inner heap buffer zeroizes on eviction.
+  Construction requires a `HardeningToken` returned by
+  `hasp_core::install()` — caching cannot be installed without
+  `PR_SET_DUMPABLE=0`, `RLIMIT_CORE=0`, and env-injection refusal
+  having been applied first (a hasp-specific architectural lever no
+  surveyed secrets CLI has). New audit-event classifiers:
+  `cache.hit` / `cache.miss` / `cache.expire` / `cache.clear`, emitted
+  through the existing `AuditSink` plumbing. Closed-shape enum
+  (`CacheEvent`) keeps the no-leak proptest invariant.
+- `--no-cache` CLI flag, `HASP_NO_CACHE=1` env var, and automatic
+  cache-disable when `$CI` is set (Granted-CLI pattern; defends
+  against the warm-cache exfil class demonstrated by the
+  Bitwarden CLI 2026.4.0 compromise and the Mini Shai-Hulud /
+  CanisterWorm worms in May 2026).
+- `Store::clear_cache()` for surgical cache invalidation; emits a
+  single `cache.clear` audit event.
+- `StoreBuilder::with_cache_policy(CachePolicy, HardeningToken)` —
+  the explicit, architecturally correct path for installing caching.
+  `cache_ttl(Option<Duration>)` remains as an ergonomic shorthand
+  that lazily installs hardening via `hasp_core::install()` (silently
+  disables caching on hardening refusal).
+- `hasp_core::install()` returning a `HardeningToken` witness type;
+  re-exported via `hasp::install_hardening`.
+
+### Changed
+
+- Default CLI behavior now memoizes fetched secrets for the lifetime
+  of one invocation (5-minute TTL, 1024-entry capacity ceiling).
+  This eliminates the duplicate-URL footgun across batched fetches
+  (`hasp get URL URL URL` triggers one backend call). Opt out per
+  invocation with `--no-cache`, per environment with
+  `HASP_NO_CACHE=1`, or run in CI (auto-disabled).
+- `Verb` audit-event domain is unchanged. Cache events use a
+  separate closed-shape `CacheEvent` classifier (`hit` / `miss` /
+  `expire` / `clear`) to keep the start/done dichotomy clean.
+
+### Dependencies
+
+- `moka = "0.12"` (sync feature only). Active (2.5k stars, 1525
+  commits, release 2026-03-22, MIT/Apache-2.0, used by crates.io).
+  Required for the synchronous eviction listener that lets the cache
+  zeroize evicted `Arc<SecretString>` entries on Drop.
+
 - `hasp diff <a> <b>` and `Store::compare(a, b) -> DiffOutcome` for
   cross-backend drift detection (#1). Read-only sibling of `cp`: fetches
   both secrets, compares in constant time via `subtle::ConstantTimeEq`,
