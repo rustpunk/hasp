@@ -9,6 +9,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `hasp diff <a> <b>` and `Store::compare(a, b) -> DiffOutcome` for
+  cross-backend drift detection (#1). Read-only sibling of `cp`: fetches
+  both secrets, compares in constant time via `subtle::ConstantTimeEq`,
+  returns the binary `Match` / `Differ`. Mismatch reveals nothing
+  beyond the boolean — no byte counts, common prefixes, or diff
+  positions. Exit codes: `0` match, `1` differ (parallels `hasp exists`);
+  backend errors flow through the standard 1–7 table. Honors the same
+  cross-environment refusal (`--yes`) and plain-http proxy refusal
+  (`HASP_ALLOW_HTTP_PROXY=1`) as `cp`. Emits `diff.start` / `diff.done`
+  audit events with `"match"` / `"differ"` / `"error"` outcomes.
+  Ecosystem-novel: only possible because `hasp` has unified URL
+  addressing across backends.
+- `memory-lock` Cargo feature in `hasp-core` (#9). Off by default;
+  opt-in by binary builders for hardened deployments. When enabled,
+  every secret fetched via the `env://` or `file://` backend is
+  memory-locked via `lock_secret_pages(bytes)` immediately after the
+  `SecretString` wrapping boundary:
+  - Linux: `mlock` + `madvise(MADV_DONTDUMP)` + `madvise(MADV_WIPEONFORK)`.
+  - macOS: `mlock`.
+  - Windows: `VirtualLock`.
+  All calls are best-effort and never abort: `EAGAIN` (RLIMIT_MEMLOCK
+  exhausted, default 64 KiB on stock Linux) returns
+  `applied: false` from `MitigationOutcome` and the secret is still
+  usable. The `hasp_core::secret_mem::wrap_secret` helper centralizes
+  the wrap-and-lock pattern for backend implementors; `lock_secret_pages`
+  is also exported directly for callers that need to lock bytes already
+  in a `SecretString`. CI matrix extended with a `memory-lock` job.
+  No new crate dependency — implemented via the `libc` and `windows-sys`
+  deps already in the workspace.
+- `hasp profile allow` + `hasp profile show` — direnv-style trust model
+  for `profiles.toml` (#17). Opt-in enforcement via
+  `HASP_REQUIRE_PROFILE_ALLOW=1`: when set, every `hasp` invocation
+  verifies that `profiles.toml` mtime and SHA-256 match the last
+  `allow`. Any modification invalidates trust until re-allowed. The
+  allow state is stored in `profiles.allowed` (same directory as
+  `profiles.toml`, `0o600` on Unix). `--no-profile-allow` bypasses
+  enforcement for scripted environments that cannot run `allow`.
+  Default is opt-in for this release; intent is to default-on in a
+  subsequent release cycle.
 - `hasp run -e KEY=URL [...] -- <cmd>` subprocess env injection (#2).
   Resolves each `KEY=URL` pair through `Store::get`, exports the
   values as environment variables, and execs the command, preserving

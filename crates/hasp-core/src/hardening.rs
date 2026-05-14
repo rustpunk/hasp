@@ -120,6 +120,50 @@ pub fn harden_process() -> Result<Vec<MitigationOutcome>, HardenRefusal> {
     Ok(apply_mitigations())
 }
 
+/// Attempt to lock the memory pages backing `bytes` into physical RAM
+/// and configure them so they are excluded from core dumps, process
+/// forks, and crash reports.
+///
+/// This function is only compiled when the `memory-lock` Cargo feature
+/// is enabled. When it is, call it immediately after creating a
+/// `SecretString` to reduce the window during which the secret resides
+/// in swappable, dumpable pages.
+///
+/// ## Graceful degrade
+///
+/// Platform calls are best-effort: `mlock` returns `EAGAIN` when
+/// `RLIMIT_MEMLOCK` is exhausted (defaults to 64 KiB on stock Linux),
+/// and `VirtualLock` can fail when the working-set ceiling is not
+/// raised. In both cases the secret remains in memory — just without
+/// the additional residency guarantee. The returned `MitigationOutcome`
+/// records whether each call succeeded.
+///
+/// ## Alignment
+///
+/// `mlock` / `VirtualLock` operate on page-granularity regions. The
+/// implementation computes the enclosing page range (page-floor of the
+/// base, page-ceiling of the end) using `sysconf(_SC_PAGESIZE)` /
+/// `GetSystemInfo` rather than a compile-time constant, so it is
+/// correct on platforms where the page size differs from 4 KiB.
+#[cfg(feature = "memory-lock")]
+pub fn lock_secret_pages(bytes: &[u8]) -> Vec<MitigationOutcome> {
+    #[cfg(target_os = "linux")]
+    return linux::lock_pages(bytes);
+    #[cfg(target_os = "macos")]
+    return macos::lock_pages(bytes);
+    #[cfg(windows)]
+    return win::lock_pages(bytes);
+    // Other Unix platforms get mlock if libc has it.
+    #[cfg(all(unix, not(target_os = "linux"), not(target_os = "macos")))]
+    return generic_unix::lock_pages(bytes);
+    #[cfg(not(any(unix, windows)))]
+    vec![MitigationOutcome {
+        name: "memory-lock:unsupported-platform",
+        applied: false,
+        note: Some("memory-lock is not implemented for this platform".into()),
+    }]
+}
+
 #[cfg(target_os = "linux")]
 mod linux {
     use super::MitigationOutcome;
@@ -161,6 +205,69 @@ mod linux {
             },
         }
     }
+
+    #[cfg(feature = "memory-lock")]
+    pub fn lock_pages(bytes: &[u8]) -> Vec<super::MitigationOutcome> {
+        let mut out = Vec::new();
+        if bytes.is_empty() {
+            return out;
+        }
+        let (base, len) = page_range(bytes);
+        // SAFETY: `base` is page-aligned, `len` covers the page range
+        // enclosing `bytes`. mlock does not dereference the pointer —
+        // it instructs the kernel to pin the pages.
+        let rc = unsafe { libc::mlock(base as *const libc::c_void, len) };
+        out.push(super::MitigationOutcome {
+            name: "linux:mlock",
+            applied: rc == 0,
+            note: if rc == 0 {
+                None
+            } else {
+                Some(format!("errno={}", std::io::Error::last_os_error()))
+            },
+        });
+
+        // MADV_DONTDUMP: exclude these pages from core dumps.
+        // SAFETY: same pointer/len as above; madvise is advisory-only.
+        let rc2 = unsafe { libc::madvise(base as *mut libc::c_void, len, libc::MADV_DONTDUMP) };
+        out.push(super::MitigationOutcome {
+            name: "linux:madvise(MADV_DONTDUMP)",
+            applied: rc2 == 0,
+            note: if rc2 == 0 {
+                None
+            } else {
+                Some(format!("errno={}", std::io::Error::last_os_error()))
+            },
+        });
+
+        // MADV_WIPEONFORK: zero the pages in the child after fork,
+        // preventing secrets from leaking into a forked process.
+        // SAFETY: same reasoning as above.
+        let rc3 = unsafe { libc::madvise(base as *mut libc::c_void, len, libc::MADV_WIPEONFORK) };
+        out.push(super::MitigationOutcome {
+            name: "linux:madvise(MADV_WIPEONFORK)",
+            applied: rc3 == 0,
+            note: if rc3 == 0 {
+                None
+            } else {
+                Some(format!("errno={}", std::io::Error::last_os_error()))
+            },
+        });
+
+        out
+    }
+
+    /// Compute the page-aligned address and length covering `bytes`.
+    #[cfg(feature = "memory-lock")]
+    fn page_range(bytes: &[u8]) -> (usize, usize) {
+        // SAFETY: sysconf is infallible for _SC_PAGESIZE on Linux.
+        let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as usize;
+        let page_size = if page_size == 0 { 4096 } else { page_size };
+        let addr = bytes.as_ptr() as usize;
+        let base = addr & !(page_size - 1);
+        let end = (addr + bytes.len() + page_size - 1) & !(page_size - 1);
+        (base, end - base)
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -189,11 +296,95 @@ mod macos {
             },
         }
     }
+
+    #[cfg(feature = "memory-lock")]
+    pub fn lock_pages(bytes: &[u8]) -> Vec<super::MitigationOutcome> {
+        if bytes.is_empty() {
+            return vec![];
+        }
+        let (base, len) = page_range(bytes);
+        // SAFETY: base is page-aligned, len covers the enclosing
+        // pages. mlock is advisory — does not dereference.
+        let rc = unsafe { libc::mlock(base as *const libc::c_void, len) };
+        vec![super::MitigationOutcome {
+            name: "macos:mlock",
+            applied: rc == 0,
+            note: if rc == 0 {
+                None
+            } else {
+                Some(format!("errno={}", std::io::Error::last_os_error()))
+            },
+        }]
+    }
+
+    #[cfg(feature = "memory-lock")]
+    fn page_range(bytes: &[u8]) -> (usize, usize) {
+        // SAFETY: sysconf is infallible for _SC_PAGESIZE.
+        let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as usize;
+        let page_size = if page_size == 0 { 16384 } else { page_size }; // M-series default
+        let addr = bytes.as_ptr() as usize;
+        let base = addr & !(page_size - 1);
+        let end = (addr + bytes.len() + page_size - 1) & !(page_size - 1);
+        (base, end - base)
+    }
+}
+
+/// Generic Unix fallback for other platforms (FreeBSD, illumos, etc.)
+/// that have `mlock` via libc but no Linux-specific `madvise` flags.
+#[cfg(all(unix, not(target_os = "linux"), not(target_os = "macos")))]
+mod generic_unix {
+    #[cfg(feature = "memory-lock")]
+    pub fn lock_pages(bytes: &[u8]) -> Vec<super::MitigationOutcome> {
+        if bytes.is_empty() {
+            return vec![];
+        }
+        let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as usize;
+        let page_size = if page_size == 0 { 4096 } else { page_size };
+        let addr = bytes.as_ptr() as usize;
+        let base = addr & !(page_size - 1);
+        let end = (addr + bytes.len() + page_size - 1) & !(page_size - 1);
+        let len = end - base;
+        // SAFETY: base is page-aligned, len covers the enclosing pages.
+        let rc = unsafe { libc::mlock(base as *const libc::c_void, len) };
+        vec![super::MitigationOutcome {
+            name: "unix:mlock",
+            applied: rc == 0,
+            note: if rc == 0 {
+                None
+            } else {
+                Some(format!("errno={}", std::io::Error::last_os_error()))
+            },
+        }]
+    }
 }
 
 #[cfg(windows)]
 mod win {
     use super::MitigationOutcome;
+
+    #[cfg(feature = "memory-lock")]
+    pub fn lock_pages(bytes: &[u8]) -> Vec<MitigationOutcome> {
+        use windows_sys::Win32::System::Memory::VirtualLock;
+        if bytes.is_empty() {
+            return vec![];
+        }
+        // SAFETY: `bytes.as_ptr()` is valid for `bytes.len()` bytes.
+        // VirtualLock takes a base address and byte count; the kernel
+        // maps the enclosing pages into the working set. Fails with
+        // ERROR_WORKING_SET_QUOTA when the working-set ceiling is
+        // exhausted — that is the graceful-degrade path.
+        let ok = unsafe { VirtualLock(bytes.as_ptr().cast(), bytes.len()) };
+        vec![MitigationOutcome {
+            name: "windows:VirtualLock",
+            applied: ok != 0,
+            note: if ok != 0 {
+                None
+            } else {
+                Some(format!("GetLastError={}", std::io::Error::last_os_error()))
+            },
+        }]
+    }
+
     use windows_sys::Win32::System::Diagnostics::Debug::{
         SetErrorMode, SEM_FAILCRITICALERRORS, SEM_NOGPFAULTERRORBOX, SEM_NOOPENFILEERRORBOX,
     };

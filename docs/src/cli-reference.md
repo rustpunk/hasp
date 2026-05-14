@@ -216,6 +216,44 @@ The defaults are deliberately stricter than Unix `cp`:
 For the full threat model and platform-hardening rationale, see
 `docs/internal/research/RESEARCH-cp-threat-model.md`.
 
+## `hasp diff <a> <b>`
+
+Compare two secrets across (possibly different) backends without
+revealing anything about their contents beyond a binary
+match/differ verdict.
+
+```bash
+hasp diff @stage/db @prod/db                  # exits 0 on match, 1 on differ
+hasp diff file:///tmp/a file:///tmp/b
+hasp diff --explain @stage/db @prod/db        # dry-run; no fetch
+```
+
+- **Arguments:**
+  - `a`, `b` — URLs or aliases. Both backends must support `get`.
+- **Flags:**
+  - `-y, --yes` — Confirm a cross-environment comparison (mirrors `cp`).
+  - `--explain` (global) — Resolves both URLs and prints the plan; does
+    not call `get`.
+- **Exit codes:**
+  - `0` — Both secrets compared byte-equal.
+  - `1` — Secrets differ (length or content), OR a usage error (parallels
+    `hasp exists`). Backend errors flow through the standard
+    [Exit codes](#exit-codes) table — auth=5, transport=4, etc.
+- **Security:** the verdict is binary by construction. Mismatch never
+  reveals byte counts, common prefixes, diff positions, or hashes. The
+  compare path uses `subtle::ConstantTimeEq` (the same crate `cp --verify`
+  uses) so timing channels are not informative about a near-match. Both
+  secret bodies stay inside `SecretString` end-to-end and are dropped
+  before `diff` returns.
+- **Audit events:** `diff.start` / `diff.done` with outcome
+  `"match"` / `"differ"` / `"error"`. See [Audit events](#audit-events).
+- **Cross-environment refusal:** same shape as `cp`. Aliases whose
+  profiles declare mismatched `environment = "..."` labels require
+  `--yes`; the refusal is not about safety (diff doesn't write) but
+  about pulling secrets from two trust tiers into the same process.
+- **Plain-http proxy refusal:** identical to `cp`; a MITM on the proxy
+  can still observe the values pulled through it.
+
 ## `hasp run -e KEY=URL [...] -- <cmd> [args...]`
 
 Fetch secrets by URL and inject them as environment variables into a

@@ -820,6 +820,114 @@ impl Store {
             verified,
         })
     }
+
+    /// Compare two secrets for byte-equality across (possibly different)
+    /// backends.
+    ///
+    /// `diff` is the read-only sibling of `copy`: both URLs are
+    /// fetched, the values are compared in constant time, and neither
+    /// the secret bytes nor any length-derived information leak through
+    /// the result. The return is the binary [`DiffOutcome::Match`] /
+    /// [`DiffOutcome::Differ`]; mismatch reveals nothing beyond the
+    /// boolean.
+    ///
+    /// # Behavior
+    ///
+    /// 1. Refuses when source and destination URLs are identical.
+    /// 2. Both schemes must resolve to a registered backend — same
+    ///    pre-flight check as `copy`, so an unknown scheme surfaces
+    ///    before any I/O.
+    /// 3. Constant-time compare via
+    ///    [`hasp_core::subtle::ConstantTimeEq`]; identical to the
+    ///    `cp --verify` path.
+    /// 4. Both secrets stay inside `SecretString` end-to-end; they are
+    ///    dropped (zeroized) as soon as `compare` returns.
+    ///
+    /// # Errors
+    ///
+    /// Propagates the backend's errors for `get` on either side.
+    /// Returns [`Error::InvalidUrl`] when the two URLs are identical
+    /// (same as `copy`).
+    pub fn compare(&self, a: &str, b: &str) -> Result<DiffOutcome, Error> {
+        let a_url = match Url::parse(a) {
+            Ok(u) => u,
+            Err(e) => return Err(Error::UrlParse(e)),
+        };
+        let b_url = match Url::parse(b) {
+            Ok(u) => u,
+            Err(e) => return Err(Error::UrlParse(e)),
+        };
+        let a_scheme = a_url.scheme().to_owned();
+        let b_scheme = b_url.scheme().to_owned();
+        self.audit(
+            AuditEvent::start(Verb::Diff, a_scheme.clone()).with_dst_scheme(b_scheme.clone()),
+        );
+        let result = self.compare_inner(&a_url, &b_url, a, b);
+        let event = match &result {
+            Ok(DiffOutcome::Match) => AuditEvent::done(Verb::Diff, a_scheme.clone(), "match")
+                .with_dst_scheme(b_scheme.clone()),
+            Ok(DiffOutcome::Differ) => AuditEvent::done(Verb::Diff, a_scheme.clone(), "differ")
+                .with_dst_scheme(b_scheme.clone()),
+            Err(e) => AuditEvent::done(Verb::Diff, a_scheme.clone(), "error")
+                .with_dst_scheme(b_scheme.clone())
+                .with_error_kind(e.kind()),
+        };
+        self.audit(event);
+        result
+    }
+
+    fn compare_inner(
+        &self,
+        a_url: &Url,
+        b_url: &Url,
+        a: &str,
+        b: &str,
+    ) -> Result<DiffOutcome, Error> {
+        if a_url.as_str() == b_url.as_str() {
+            return Err(Error::InvalidUrl(
+                "source and destination are identical".into(),
+            ));
+        }
+
+        // Surface unknown schemes before any fetch — symmetrical with
+        // `copy_inner` so the diff dry-run path stays honest.
+        let a_scheme = a_url.scheme();
+        let b_scheme = b_url.scheme();
+        let _a_backend = self
+            .backends
+            .get(a_scheme)
+            .ok_or_else(|| Error::UnknownScheme(a_scheme.to_owned()))?;
+        let _b_backend = self
+            .backends
+            .get(b_scheme)
+            .ok_or_else(|| Error::UnknownScheme(b_scheme.to_owned()))?;
+
+        let secret_a = self.get(a)?;
+        let secret_b = self.get(b)?;
+        let bytes_a = secret_a.expose_secret().as_bytes();
+        let bytes_b = secret_b.expose_secret().as_bytes();
+        use hasp_core::subtle::ConstantTimeEq;
+        // Length-mismatch implies inequality but is intentionally not
+        // reported as a separate outcome — the boolean is the whole
+        // observable, identical to the `cp --verify` posture.
+        if bytes_a.len() == bytes_b.len() && bytes_a.ct_eq(bytes_b).unwrap_u8() == 1 {
+            Ok(DiffOutcome::Match)
+        } else {
+            Ok(DiffOutcome::Differ)
+        }
+    }
+}
+
+/// Result of [`Store::compare`].
+///
+/// Binary by design — a mismatch must not reveal byte counts, common
+/// prefixes, or any other length-derived signal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiffOutcome {
+    /// Both secrets compared byte-equal.
+    Match,
+    /// The secrets differed (length or content).
+    Differ,
 }
 
 /// What to do when the destination of a `copy` already holds a value.

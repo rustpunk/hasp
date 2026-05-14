@@ -11,6 +11,7 @@ pub mod field;
 pub mod hardening;
 pub mod proxy;
 pub mod retry;
+pub mod secret_mem;
 
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_utils;
@@ -20,6 +21,8 @@ pub use audit::SyslogSink;
 pub use audit::{AuditEvent, AuditSink, FileSink, NoopSink, StderrSink, Verb};
 pub use error::{BackendFailureKind, Error};
 pub use field::{extract_field, extract_field_from_str};
+#[cfg(feature = "memory-lock")]
+pub use hardening::lock_secret_pages;
 pub use hardening::{
     apply_mitigations, check_refusal_conditions, harden_process, HardenRefusal, MitigationOutcome,
 };

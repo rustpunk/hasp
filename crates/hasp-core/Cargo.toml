@@ -9,6 +9,12 @@ description = "Core contracts, errors, and traits for hasp."
 
 [features]
 test-utils = ["dep:tempfile"]
+# Opt-in feature: lock secret pages in physical memory and suppress
+# core-dump / fork leakage of secret-backing allocations. Off by default
+# because RLIMIT_MEMLOCK defaults to 64 KiB on stock Linux distros —
+# exhaustion silently degrades to unprotected (and is logged). Enabled
+# by binary builders for hardened deployments.
+memory-lock = []
 
 [dependencies]
 url = "2.5"
@@ -27,6 +33,7 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_Diagnostics_Debug",
     "Win32_System_ErrorReporting",
     "Win32_System_LibraryLoader",
+    "Win32_System_Memory",
     "Win32_System_Threading",
 ] }
 

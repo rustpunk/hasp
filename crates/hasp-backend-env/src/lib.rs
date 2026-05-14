@@ -11,7 +11,7 @@
 //! Platform-specific failure modes:
 //! - None (stdlib only). `NotFound` is returned when the variable is unset.
 
-use hasp_core::{Backend, Entry, Error, SecretString};
+use hasp_core::{secret_mem::wrap_secret, Backend, Entry, Error, SecretString};
 use url::Url;
 
 /// URL shape for `env://` addresses.
@@ -67,7 +67,7 @@ impl Backend for EnvBackend {
     fn get(&self, url: &Url) -> Result<SecretString, Error> {
         let env_url = EnvUrl::try_from(url)?;
         match std::env::var(&env_url.var_name) {
-            Ok(value) => Ok(SecretString::new(value.into())),
+            Ok(value) => Ok(wrap_secret(value)),
             Err(std::env::VarError::NotPresent) => Err(Error::NotFound(format!(
                 "env var '{}' not set",
                 env_url.var_name

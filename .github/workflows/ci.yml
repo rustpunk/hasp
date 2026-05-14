@@ -22,6 +22,8 @@ jobs:
             flags:
           - name: minimal-backends
             flags: --no-default-features --features env,file,keyring
+          - name: memory-lock
+            flags: --no-default-features --features env,file,hasp-core/memory-lock
     name: lint-and-test (${{ matrix.feature-set.name }})
     steps:
       - uses: actions/checkout@v4

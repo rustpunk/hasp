@@ -110,6 +110,45 @@ cargo build --release --bin hasp --no-default-features \
 Cutting unused backends shrinks the binary and trims the dependency
 graph; functionally there's no difference for the backends you keep.
 
+## Hardened builds — `memory-lock` feature
+
+The `memory-lock` feature instructs `hasp-core` to lock the physical
+memory pages backing every fetched secret, preventing them from being
+swapped to disk or included in crash dumps. Enable it at build time:
+
+```bash
+cargo build --release --bin hasp \
+  --features hasp-core/memory-lock
+```
+
+### What it does
+
+| Platform | Calls made |
+|---|---|
+| Linux | `mlock(addr, len)` + `madvise(MADV_DONTDUMP)` + `madvise(MADV_WIPEONFORK)` |
+| macOS | `mlock(addr, len)` |
+| Windows | `VirtualLock(addr, len)` |
+
+`MADV_DONTDUMP` excludes the pages from `/proc/<pid>/coredump_filter`;
+`MADV_WIPEONFORK` zeroes them in the child after `fork(2)`.
+
+### Graceful degrade
+
+All calls are best-effort. On Linux, `RLIMIT_MEMLOCK` defaults to
+64 KiB for unprivileged users — once that budget is exhausted, `mlock`
+returns `EAGAIN` and the secret remains usable but swappable. The
+`MitigationOutcome` records whether each call succeeded; pass
+`--verbose` to surface a summary in a future `hasp` release.
+
+### What it does NOT promise
+
+- Secrets already in the kernel's page cache (e.g., from `file://` read)
+  before `mlock` was called may still be swappable until the call lands.
+- Core dump exclusion does not prevent `/proc/<pid>/mem` reads by a
+  same-uid process — that requires `PR_SET_DUMPABLE` (already applied by
+  `hasp-core::hardening` regardless of this feature).
+- SLSA / supply-chain guarantees are independent of runtime memory posture.
+
 ## Verify the install
 
 ```bash

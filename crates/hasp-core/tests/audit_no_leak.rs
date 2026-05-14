@@ -42,7 +42,7 @@ proptest! {
     fn done_event_never_contains_secret_value(
         scheme in WIDE_SCHEME,
         dst_scheme in WIDE_SCHEME,
-        outcome in prop::sample::select(vec!["ok", "error", "copied", "skipped", "dry_run", "present", "absent", "child_nonzero"]),
+        outcome in prop::sample::select(vec!["ok", "error", "copied", "skipped", "dry_run", "present", "absent", "child_nonzero", "match", "differ"]),
         error_kind in prop::sample::select(vec!["url_parse", "invalid_url", "not_found", "permission_denied", "auth_failed", "precondition_failed", "backend", "other", "unknown_scheme", "unsupported_operation"]),
     ) {
         let ev = AuditEvent::done(Verb::Cp, scheme, outcome)
