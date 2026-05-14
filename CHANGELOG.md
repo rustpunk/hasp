@@ -84,11 +84,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - CLI exit codes are now granular: 0 success, 1 usage/local, 2 not-found,
-  3 permission-denied, 4 transport, 5 auth-failed, 6 precondition. `hasp
-  exists` preserves the 0/1 boolean (present/absent), but backend errors
-  during `exists` flow through the standard table. **Soft breaking
-  change** for scripts that grep on a specific non-zero exit code — every
-  prior failure was code 1; now failures fan out into 1–6.
+  3 permission-denied, 4 transport, 5 auth-failed, 6 precondition, 7
+  backend (permanent / unexpected response). `hasp exists` preserves the
+  0/1 boolean (present/absent), but backend errors during `exists` flow
+  through the standard table. **Soft breaking change** for scripts that
+  grep on a specific non-zero exit code — every prior failure was code 1;
+  now failures fan out into 1–7.
 - `Backend` newtype removed in favor of `pub type Backend = Arc<dyn hasp_core::Backend>`;
   factory functions (`hasp::env()`, `hasp::file()`, etc.) replace enum
   constructors. Breaking change for `0.1.0-alpha` consumers.

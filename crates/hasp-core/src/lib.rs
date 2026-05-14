@@ -73,6 +73,17 @@ pub trait Backend: Send + Sync {
 
     /// Returns `true` if a secret exists at the given URL.
     fn exists(&self, url: &Url) -> Result<bool, Error>;
+
+    /// Validate URL grammar without performing I/O.
+    ///
+    /// Backends override by delegating to their existing URL `TryFrom`.
+    /// Used by `Store::resolve` so `--explain` rejects the same URLs
+    /// `get` would — keeps the dry-run path honest about what an actual
+    /// operation would do. Default impl is a no-op for backends that
+    /// have no grammar to validate beyond the scheme.
+    fn validate(&self, _url: &Url) -> Result<(), Error> {
+        Ok(())
+    }
 }
 
 /// A named entry returned by `Backend::list`.

@@ -80,7 +80,13 @@ jobs:
 
       - name: Generate SLSA build provenance
         id: attest
-        uses: actions/attest-build-provenance@v1
+        # SHA-pinned per supply-chain best practice — the same threat
+        # class this attestation defends against (the Bitwarden CLI
+        # npm compromise) lets a compromised action exfiltrate the
+        # OIDC token. Bumping requires editing this line; do not
+        # convert back to a floating tag without explicit review.
+        # v4.1.0 = a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32
         with:
           subject-path: ${{ steps.pkg.outputs.path }}
 

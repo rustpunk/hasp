@@ -182,6 +182,11 @@ const EXIT_PERMISSION_DENIED: i32 = 3;
 const EXIT_TRANSPORT: i32 = 4;
 const EXIT_AUTH_FAILED: i32 = 5;
 const EXIT_PRECONDITION: i32 = 6;
+// Permanent backend failure that doesn't fit a more-specific code
+// (e.g. unexpected 4xx, malformed response). Distinct from EXIT_USAGE
+// so scripted callers can distinguish a flag mistake from a backend
+// returning something unexpected.
+const EXIT_BACKEND: i32 = 7;
 
 fn run(cli: Cli) -> Result<(), (i32, String)> {
     // Init does not need profiles or a store.
@@ -588,8 +593,12 @@ fn exit_code(err: &hasp::Error) -> i32 {
             kind: BackendFailureKind::Transient | BackendFailureKind::Throttled,
             ..
         } => EXIT_TRANSPORT,
-        // `Backend { kind: Permanent }` and any future-added variant
-        // fall through to usage (1) rather than misclassify as transport.
+        hasp::Error::Backend {
+            kind: BackendFailureKind::Permanent,
+            ..
+        } => EXIT_BACKEND,
+        // Future-added variants (Error is #[non_exhaustive]) fall through
+        // to usage rather than be misclassified.
         _ => EXIT_USAGE,
     }
 }
@@ -729,5 +738,142 @@ fn fmt_error(err: hasp::Error) -> String {
             _ => format!("backend '{scheme}' failed: {message}"),
         },
         _ => err.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hasp::BackendFailureKind;
+
+    #[test]
+    fn exit_code_url_parse() {
+        let err = url::Url::parse("not a url").unwrap_err();
+        assert_eq!(exit_code(&hasp::Error::UrlParse(err)), EXIT_USAGE);
+    }
+
+    #[test]
+    fn exit_code_invalid_url() {
+        assert_eq!(
+            exit_code(&hasp::Error::InvalidUrl("bad".into())),
+            EXIT_USAGE
+        );
+    }
+
+    #[test]
+    fn exit_code_unknown_scheme() {
+        assert_eq!(
+            exit_code(&hasp::Error::UnknownScheme("foo".into())),
+            EXIT_USAGE
+        );
+    }
+
+    #[test]
+    fn exit_code_unsupported_operation() {
+        assert_eq!(
+            exit_code(&hasp::Error::UnsupportedOperation {
+                scheme: "env",
+                operation: "put"
+            }),
+            EXIT_USAGE
+        );
+    }
+
+    #[test]
+    fn exit_code_not_found() {
+        assert_eq!(
+            exit_code(&hasp::Error::NotFound("x".into())),
+            EXIT_NOT_FOUND
+        );
+    }
+
+    #[test]
+    fn exit_code_permission_denied() {
+        assert_eq!(
+            exit_code(&hasp::Error::PermissionDenied("x".into())),
+            EXIT_PERMISSION_DENIED
+        );
+    }
+
+    #[test]
+    fn exit_code_auth_failed() {
+        assert_eq!(
+            exit_code(&hasp::Error::AuthenticationFailed("x".into())),
+            EXIT_AUTH_FAILED
+        );
+    }
+
+    #[test]
+    fn exit_code_precondition_failed() {
+        assert_eq!(
+            exit_code(&hasp::Error::PreconditionFailed("x".into())),
+            EXIT_PRECONDITION
+        );
+    }
+
+    #[test]
+    fn exit_code_backend_transient() {
+        assert_eq!(
+            exit_code(&hasp::Error::Backend {
+                scheme: "vault",
+                kind: BackendFailureKind::Transient,
+                message: "timeout".into(),
+            }),
+            EXIT_TRANSPORT
+        );
+    }
+
+    #[test]
+    fn exit_code_backend_throttled() {
+        assert_eq!(
+            exit_code(&hasp::Error::Backend {
+                scheme: "aws-sm",
+                kind: BackendFailureKind::Throttled,
+                message: "429".into(),
+            }),
+            EXIT_TRANSPORT
+        );
+    }
+
+    #[test]
+    fn exit_code_backend_permanent() {
+        assert_eq!(
+            exit_code(&hasp::Error::Backend {
+                scheme: "gcp-sm",
+                kind: BackendFailureKind::Permanent,
+                message: "418".into(),
+            }),
+            EXIT_BACKEND
+        );
+    }
+
+    #[test]
+    fn compose_field_appends_query() {
+        let out = compose_field("vault://kv/data/app", "password").unwrap();
+        // url crate normalizes the trailing slash; check the suffix.
+        assert!(out.ends_with("?field=password"), "got: {out}");
+    }
+
+    #[test]
+    fn compose_field_appends_to_existing_query() {
+        let out = compose_field("vault://kv/data/app?version=2", "password").unwrap();
+        assert!(
+            out.contains("version=2") && out.contains("field=password"),
+            "got: {out}"
+        );
+    }
+
+    #[test]
+    fn compose_field_encodes_special_chars() {
+        // url::Url::query_pairs_mut percent-encodes spaces as `+`.
+        let out = compose_field("vault://kv/data/app", "with space").unwrap();
+        assert!(out.contains("field=with+space"), "got: {out}");
+    }
+
+    #[test]
+    fn compose_field_refuses_double_spec() {
+        let err = compose_field("vault://kv/data/app?field=already", "password").unwrap_err();
+        assert_eq!(err.0, EXIT_USAGE);
+        assert!(err.1.contains("already specifies ?field="));
     }
 }

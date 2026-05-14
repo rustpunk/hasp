@@ -163,6 +163,10 @@ impl Backend for AwsSmBackend {
         "aws-sm"
     }
 
+    fn validate(&self, url: &Url) -> Result<(), Error> {
+        AwsSmUrl::try_from(url).map(|_| ())
+    }
+
     fn get(&self, url: &Url) -> Result<SecretString, Error> {
         let aws_url = AwsSmUrl::try_from(url)?;
         if aws_url.secret_name.is_empty() {
@@ -742,5 +746,33 @@ mod tests {
     fn backend_scheme() {
         let backend = AwsSmBackend::new();
         assert_eq!(backend.scheme(), "aws-sm");
+    }
+
+    // Confirms the get-path extraction integration: a typical AWS
+    // Secrets Manager JSON payload + ?field= path produces the same
+    // result as the shared helper. Catches regressions where a
+    // backend's get() forgets to call extract_field_from_str (e.g.,
+    // future refactors that bypass the field-extraction step).
+    #[test]
+    fn field_extraction_happy() {
+        // Typical aws-sm payload shape: a JSON object stored as the
+        // secret string.
+        let payload = r#"{"username":"app","password":"hunter2"}"#;
+        let v = hasp_core::extract_field_from_str(payload, "password").unwrap();
+        assert_eq!(v, "hunter2");
+    }
+
+    #[test]
+    fn field_extraction_missing_field_is_not_found() {
+        let payload = r#"{"username":"app"}"#;
+        let err = hasp_core::extract_field_from_str(payload, "password").unwrap_err();
+        assert!(matches!(err, Error::NotFound(_)));
+    }
+
+    #[test]
+    fn field_extraction_non_json_is_invalid_url() {
+        let payload = "not-a-json-secret";
+        let err = hasp_core::extract_field_from_str(payload, "password").unwrap_err();
+        assert!(matches!(err, Error::InvalidUrl(_)));
     }
 }

@@ -1,8 +1,10 @@
 //! CLI tests for `-F` / `--field` field extraction.
 //!
-//! End-to-end extraction is covered by per-backend unit tests; this
-//! suite asserts the CLI surface — flag composition into `?field=`
-//! and the refusal when both forms are passed.
+//! The composition mechanism is unit-tested in `main.rs::tests`. This
+//! suite covers the CLI integration surface: refusal when `-F` and
+//! `?field=` are both passed, and the `--explain` path's URL validation
+//! (now that `Store::resolve` calls `Backend::validate`, a synthesized
+//! `?field=` on a backend that doesn't accept query params fails fast).
 
 use hasp_core::test_utils::{EnvGuard, ENV_LOCK};
 use std::process::Command;
@@ -18,9 +20,11 @@ fn hasp() -> Command {
 }
 
 #[test]
-fn explain_threads_field_into_resolved_url() {
+fn explain_rejects_field_on_unsupporting_backend() {
     let _env_lock = ENV_LOCK.lock().unwrap();
     let _guard = EnvGuard::set("HASP_FIELD_EXPLAIN", "x");
+    // env:// rejects query params; --explain must surface this rather
+    // than silently print a URL that real `get` would refuse.
     let output = hasp()
         .args([
             "--explain",
@@ -31,15 +35,16 @@ fn explain_threads_field_into_resolved_url() {
         ])
         .output()
         .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("field=.creds.password"),
-        "explain output should include the threaded field, got: {stderr}"
+        stderr.contains("env:// does not accept query parameters"),
+        "expected env:// query-param refusal, got: {stderr}"
     );
 }
 
@@ -56,14 +61,10 @@ fn double_field_refused() {
         ])
         .output()
         .unwrap();
-    assert_eq!(out_code(&output), 1);
+    assert_eq!(output.status.code(), Some(1));
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("already specifies ?field="),
         "expected refusal message, got: {stderr}"
     );
-}
-
-fn out_code(out: &std::process::Output) -> i32 {
-    out.status.code().expect("exit code")
 }

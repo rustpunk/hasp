@@ -82,6 +82,10 @@ impl Backend for FileBackend {
         "file"
     }
 
+    fn validate(&self, url: &Url) -> Result<(), Error> {
+        FileUrl::try_from(url).map(|_| ())
+    }
+
     fn get(&self, url: &Url) -> Result<SecretString, Error> {
         let file_url = FileUrl::try_from(url)?;
         let mut contents =

@@ -36,6 +36,7 @@ failure modes without parsing stderr.
 | 4 | Transport / network failure (transient or throttled). Retry may help. |
 | 5 | Authentication failed (credentials missing, invalid, or expired). |
 | 6 | Precondition failed (e.g. `cp` cross-environment refusal, plain-http proxy refusal, `--verify` mismatch, `--if-exists=fail` blocked). |
+| 7 | Backend failure (permanent / unexpected backend response that doesn't fit a more-specific code). |
 
 `hasp exists` is a special case: it overloads codes 0 and 1 to mean
 `present` and `absent`. Backend errors during `exists` still flow

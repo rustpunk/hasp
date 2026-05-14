@@ -109,6 +109,10 @@ impl Backend for VaultBackend {
         "vault"
     }
 
+    fn validate(&self, url: &Url) -> Result<(), Error> {
+        VaultUrl::try_from(url).map(|_| ())
+    }
+
     fn get(&self, url: &Url) -> Result<SecretString, Error> {
         check_ambient_credentials()?;
         let vault_url = VaultUrl::try_from(url)?;

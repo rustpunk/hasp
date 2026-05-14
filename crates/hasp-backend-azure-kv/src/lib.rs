@@ -227,6 +227,10 @@ impl Backend for AzureKvBackend {
         Self::SCHEME
     }
 
+    fn validate(&self, url: &Url) -> Result<(), Error> {
+        AzureKvUrl::try_from(url).map(|_| ())
+    }
+
     fn get(&self, url: &Url) -> Result<SecretString, Error> {
         let kv_url = AzureKvUrl::try_from(url)?;
         Self::ensure_secret_name(&kv_url)?;
@@ -730,5 +734,30 @@ mod tests {
     fn backend_scheme() {
         let backend = AzureKvBackend::new();
         assert_eq!(backend.scheme(), "azure-kv");
+    }
+
+    // Azure KV returns `value` as a string field on the SecretResponse;
+    // when `?field=` is set the get-path treats that string as a JSON
+    // payload and walks it. These tests cover the shared helper on
+    // representative Azure shapes.
+    #[test]
+    fn field_extraction_happy() {
+        let payload = r#"{"username":"app","password":"hunter2"}"#;
+        let v = hasp_core::extract_field_from_str(payload, "password").unwrap();
+        assert_eq!(v, "hunter2");
+    }
+
+    #[test]
+    fn field_extraction_missing_field_is_not_found() {
+        let payload = r#"{"username":"app"}"#;
+        let err = hasp_core::extract_field_from_str(payload, "password").unwrap_err();
+        assert!(matches!(err, Error::NotFound(_)));
+    }
+
+    #[test]
+    fn field_extraction_non_json_is_invalid_url() {
+        let payload = "plain-string-not-json";
+        let err = hasp_core::extract_field_from_str(payload, "password").unwrap_err();
+        assert!(matches!(err, Error::InvalidUrl(_)));
     }
 }

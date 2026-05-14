@@ -189,6 +189,10 @@ impl Backend for GcpSmBackend {
         Self::SCHEME
     }
 
+    fn validate(&self, url: &Url) -> Result<(), Error> {
+        GcpSmUrl::try_from(url).map(|_| ())
+    }
+
     fn get(&self, url: &Url) -> Result<SecretString, Error> {
         let gcp_url = GcpSmUrl::try_from(url)?;
         if gcp_url.secret_id.is_empty() {
@@ -741,5 +745,29 @@ mod tests {
     fn backend_scheme() {
         let backend = GcpSmBackend::new();
         assert_eq!(backend.scheme(), "gcp-sm");
+    }
+
+    // GCP returns secret bytes base64-decoded by get(); the post-decode
+    // UTF-8 string is the JSON payload the user stored. These tests
+    // exercise the shared helper on representative payloads.
+    #[test]
+    fn field_extraction_happy() {
+        let payload = r#"{"db":{"password":"hunter2"}}"#;
+        let v = hasp_core::extract_field_from_str(payload, ".db.password").unwrap();
+        assert_eq!(v, "hunter2");
+    }
+
+    #[test]
+    fn field_extraction_missing_field_is_not_found() {
+        let payload = r#"{"db":{}}"#;
+        let err = hasp_core::extract_field_from_str(payload, ".db.password").unwrap_err();
+        assert!(matches!(err, Error::NotFound(_)));
+    }
+
+    #[test]
+    fn field_extraction_non_json_is_invalid_url() {
+        let payload = "raw-bytes-not-json";
+        let err = hasp_core::extract_field_from_str(payload, "password").unwrap_err();
+        assert!(matches!(err, Error::InvalidUrl(_)));
     }
 }

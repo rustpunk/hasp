@@ -60,6 +60,10 @@ impl Backend for EnvBackend {
         "env"
     }
 
+    fn validate(&self, url: &Url) -> Result<(), Error> {
+        EnvUrl::try_from(url).map(|_| ())
+    }
+
     fn get(&self, url: &Url) -> Result<SecretString, Error> {
         let env_url = EnvUrl::try_from(url)?;
         match std::env::var(&env_url.var_name) {

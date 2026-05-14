@@ -198,6 +198,10 @@ impl Backend for OpBackend {
         "op"
     }
 
+    fn validate(&self, url: &Url) -> Result<(), Error> {
+        OpUrl::try_from(url).map(|_| ())
+    }
+
     fn get(&self, url: &Url) -> Result<SecretString, Error> {
         self.ensure_init()?;
         check_ambient_credentials()?;
