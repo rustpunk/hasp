@@ -29,6 +29,10 @@ fn hasp() -> Command {
     ] {
         cmd.env_remove(var);
     }
+    // Default-on profile-allow enforcement would refuse temp
+    // profiles.toml files used in these tests; opt out so the tests
+    // exercise their intended diff semantics.
+    cmd.env("HASP_REQUIRE_PROFILE_ALLOW", "0");
     cmd
 }
 

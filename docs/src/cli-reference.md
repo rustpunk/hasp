@@ -331,7 +331,22 @@ hasp man > /usr/share/man/man1/hasp.1
 | `-q, --quiet` | Suppress non-error informational output. |
 | `-v, --verbose` | Increase output verbosity; prints operation traces to stderr. Can be used multiple times (`-vv`). |
 | `--no-cache` | Disable the per-invocation in-process secret cache for this invocation. |
-| `--no-profile-allow` | Skip `HASP_REQUIRE_PROFILE_ALLOW` enforcement for this invocation. |
+| `--no-profile-allow` | Skip the profile-allow enforcement for this invocation (per-invocation opt-out of the default-on `HASP_REQUIRE_PROFILE_ALLOW` enforcement). |
+
+## Profile-allow enforcement
+
+Profile-allow is **on by default**. Before `hasp` will use profile
+aliases (`@profile/key`), the operator must run `hasp profile allow`
+to record `profiles.toml` as trusted (mtime + SHA-256 baseline,
+direnv-style).
+
+Opt out per environment with `HASP_REQUIRE_PROFILE_ALLOW=0` (also
+accepts `false`, `no`, `off`). Per-invocation bypass via
+`--no-profile-allow`.
+
+Refusal exit code is `6` (precondition) — matches the verb-error
+mapping convention; scripted callers can distinguish "no trusted
+profiles.toml" from usage errors (`1`).
 
 ## Caching
 

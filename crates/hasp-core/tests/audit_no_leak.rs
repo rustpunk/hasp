@@ -37,7 +37,6 @@ fn any_verb() -> impl Strategy<Value = Verb> {
         Verb::Delete,
         Verb::Exists,
         Verb::Cp,
-        Verb::Run,
         Verb::Diff,
     ])
 }

@@ -149,6 +149,10 @@ my_secret = "env://HASP_CLI_PROFILE_SECRET"
     let output = hasp()
         .args(["get", "@test/my_secret"])
         .env("HASP_PROFILES_PATH", profile_path.as_os_str())
+        // Default-on profile-allow enforcement would refuse this temp
+        // profiles.toml; this test is about profile resolution, not
+        // trust enforcement, so opt out.
+        .env("HASP_REQUIRE_PROFILE_ALLOW", "0")
         .output()
         .unwrap();
 

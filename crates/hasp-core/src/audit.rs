@@ -21,6 +21,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 /// The verb a `Store` operation belongs to. Closed set so audit event
 /// labels are statically known and cannot be widened by a caller.
+///
+/// Library-side verbs only. CLI-only concerns like `run` (subprocess
+/// env injection) live in `hasp-cli` and build their own events via
+/// [`AuditEvent::with_event`] using a `&'static str` label literal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verb {
     Get,
@@ -29,7 +33,6 @@ pub enum Verb {
     Delete,
     Exists,
     Cp,
-    Run,
     Diff,
 }
 
@@ -67,7 +70,6 @@ impl Verb {
             Verb::Delete => "delete.start",
             Verb::Exists => "exists.start",
             Verb::Cp => "cp.start",
-            Verb::Run => "run.start",
             Verb::Diff => "diff.start",
         }
     }
@@ -81,7 +83,6 @@ impl Verb {
             Verb::Delete => "delete.done",
             Verb::Exists => "exists.done",
             Verb::Cp => "cp.done",
-            Verb::Run => "run.done",
             Verb::Diff => "diff.done",
         }
     }
@@ -142,6 +143,29 @@ impl AuditEvent {
     pub fn with_error_kind(mut self, kind: &'static str) -> Self {
         self.error_kind = Some(kind);
         self
+    }
+
+    /// Build an event with an arbitrary `'static` event label.
+    ///
+    /// CLI-only verbs that do not belong on the library-side [`Verb`]
+    /// enum (e.g., `run.start` / `run.done` from subprocess env
+    /// injection) build events through this constructor. The
+    /// `&'static str` bound prevents runtime-built label strings from
+    /// smuggling value bytes into the audit envelope: callers must
+    /// pass string literals known at compile time.
+    pub fn with_event(
+        event: &'static str,
+        scheme: impl Into<String>,
+        outcome: &'static str,
+    ) -> Self {
+        Self {
+            ts: SystemTime::now(),
+            event,
+            url_scheme: scheme.into(),
+            dst_scheme: None,
+            outcome,
+            error_kind: None,
+        }
     }
 
     /// Build a cache event for the given URL scheme. Single-phase —
@@ -400,7 +424,6 @@ mod tests {
             Verb::Delete,
             Verb::Exists,
             Verb::Cp,
-            Verb::Run,
             Verb::Diff,
         ] {
             assert!(v.start_label().ends_with(".start"));

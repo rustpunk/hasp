@@ -308,18 +308,27 @@ fn run(cli: Cli, hardening_token: hasp::HardeningToken) -> Result<(), (i32, Stri
     let profiles = profiles::load_profiles()
         .map_err(|e| usage_err(format!("failed to load profiles: {e}")))?;
 
-    // Profile allow-list enforcement. Active when
-    // `HASP_REQUIRE_PROFILE_ALLOW` is set to a truthy value (`1` or
-    // `true`) AND `--no-profile-allow` is not given. Refuse unless the
+    // Profile allow-list enforcement. ON by default; opt out via
+    // `HASP_REQUIRE_PROFILE_ALLOW=0` (or `false`/`no`/`off`) or
+    // `--no-profile-allow` for per-invocation bypass. Refuse unless the
     // current `profiles.toml` has been explicitly marked trusted via
-    // `hasp profile allow`. Truthy-only semantics match the
-    // documented `=1` contract; `=0`, empty, or unset all disable.
-    if is_truthy_env("HASP_REQUIRE_PROFILE_ALLOW")
-        && !matches!(&cli.command, Command::Profile { .. })
+    // `hasp profile allow`.
+    //
+    // The default-on flip is a soft breaking change from prior releases
+    // where enforcement was opt-in. Documented in `CHANGELOG.md` and
+    // `docs/src/cli-reference.md`; on first invocation under the new
+    // default that finds an unallowed `profiles.toml`, the resulting
+    // `PreconditionFailed` error message points the user at
+    // `hasp profile allow`.
+    if !is_falsy_env("HASP_REQUIRE_PROFILE_ALLOW")
+        && !matches!(
+            &cli.command,
+            Command::Profile { .. } | Command::Cache { .. }
+        )
     {
         if let Some(profiles_path) = profile_allow::profiles_toml_path() {
             profile_allow::check_profile_allowed(&profiles_path, cli.no_profile_allow)
-                .map_err(|e| usage_err(e.to_string()))?;
+                .map_err(|e| precondition_err(e.to_string()))?;
         }
     }
 
@@ -746,6 +755,19 @@ fn is_truthy_env(name: &str) -> bool {
         Ok(v) => matches!(
             v.trim().to_ascii_lowercase().as_str(),
             "1" | "true" | "yes" | "on"
+        ),
+        Err(_) => false,
+    }
+}
+
+/// Falsy-only env-var check. Used for opt-out flags whose default is
+/// "on" (e.g., `HASP_REQUIRE_PROFILE_ALLOW=0` disables enforcement
+/// that is otherwise on by default).
+fn is_falsy_env(name: &str) -> bool {
+    match std::env::var(name) {
+        Ok(v) => matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "0" | "false" | "no" | "off"
         ),
         Err(_) => false,
     }

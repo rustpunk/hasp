@@ -74,9 +74,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`hasp get URL URL URL` triggers one backend call). Opt out per
   invocation with `--no-cache`, per environment with
   `HASP_NO_CACHE=1`, or run in CI (auto-disabled).
-- `Verb` audit-event domain is unchanged. Cache events use a
-  separate closed-shape `CacheEvent` classifier (`hit` / `miss` /
-  `expire` / `clear`) to keep the start/done dichotomy clean.
+- `Verb::Run` removed from the library-side `hasp_core::audit::Verb`
+  enum. `run` is a CLI-only concern (subprocess env injection) and
+  does not belong on the library trait surface. CLI emission of
+  `run.start` / `run.done` events now goes through the new
+  `AuditEvent::with_event(event: &'static str, …)` constructor,
+  which preserves the closed-set / no-leak invariant via the static
+  string bound. **Soft breaking change** for any downstream that
+  pattern-matched on `Verb::Run`.
+- `HASP_REQUIRE_PROFILE_ALLOW` default is now **on**.
+  Previously opt-in (`=1` enabled), now opt-out (`=0` / `false` /
+  `no` / `off` disables; `--no-profile-allow` flag continues to
+  bypass per-invocation). Refusal exit code is now 6 (precondition),
+  matching the verb-error mapping conventions. **Soft breaking
+  change**: existing users with a `profiles.toml` must run
+  `hasp profile allow` once on upgrade, or set
+  `HASP_REQUIRE_PROFILE_ALLOW=0` to opt out.
+- `Verb` audit-event domain is unchanged otherwise. Cache events use
+  a separate closed-shape `CacheEvent` classifier (`hit` / `miss` /
+  `expire` / `clear`).
 
 ### Dependencies
 
