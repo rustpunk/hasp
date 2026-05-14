@@ -202,14 +202,25 @@ impl FileSink {
     /// platforms the OS-default ACL applies.
     pub fn open(path: impl AsRef<Path>) -> io::Result<Self> {
         let path = path.as_ref().to_path_buf();
-        let file = OpenOptions::new().create(true).append(true).open(&path)?;
 
+        // On Unix, set mode 0o600 at open time via OpenOptionsExt so a
+        // same-uid attacker cannot win the race between create and the
+        // subsequent chmod. The mode only applies when the file is
+        // newly created; existing files keep their current
+        // permissions (caller's responsibility — we don't widen).
+        let file;
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = file.metadata()?.permissions();
-            perms.set_mode(0o600);
-            file.set_permissions(perms)?;
+            use std::os::unix::fs::OpenOptionsExt;
+            file = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .mode(0o600)
+                .open(&path)?;
+        }
+        #[cfg(not(unix))]
+        {
+            file = OpenOptions::new().create(true).append(true).open(&path)?;
         }
 
         Ok(Self {
@@ -241,30 +252,38 @@ impl AuditSink for FileSink {
 /// should use [`FileSink`] and ship the file to whatever ingest the
 /// host runs.
 ///
-/// Each call to `emit` invokes `libc::syslog(priority, "%s\0", line)`
-/// where `priority` is `LOG_INFO | LOG_USER` (configurable on
-/// construction). The libc client takes care of socket-path
-/// portability (`/dev/log` on Linux, `/var/run/syslog` on macOS) and
-/// RFC3164/5424 framing — we don't reimplement either.
+/// Each call to `emit` invokes `libc::syslog(priority, "%s", line)`
+/// where `priority` is `LOG_INFO | LOG_USER`. The libc client takes
+/// care of socket-path portability (`/dev/log` on Linux,
+/// `/var/run/syslog` on macOS) and RFC3164/5424 framing — we don't
+/// reimplement either.
 ///
-/// `openlog` is called once on construction with the passed `ident`
-/// (typically `"hasp"`); the syslog connection persists for the
-/// lifetime of the sink. `closelog` is called on drop.
+/// ## Process-singleton constraint
+///
+/// `openlog(3)` / `closelog(3)` mutate process-global state in the
+/// libc syslog client — a second `openlog` call replaces the first
+/// connection's ident, and `closelog` tears down the connection for
+/// **every** holder. To avoid cross-close hazards, this type
+/// deliberately:
+///
+/// 1. Leaks the `ident` `CString` (`Box::leak`) so the pointer
+///    `openlog` retained stays valid for the process lifetime, and
+/// 2. Does **not** implement `Drop` (no `closelog` call).
+///
+/// Construct at most one `SyslogSink` per process. The CLI does
+/// exactly this via `resolve_audit_sink()`. Library consumers that
+/// need a second syslog destination should wrap an existing
+/// `Arc<SyslogSink>` rather than calling `SyslogSink::open` again.
 #[cfg(unix)]
 #[derive(Debug)]
 pub struct SyslogSink {
-    /// Held for the lifetime of the sink so the C string passed to
-    /// `openlog` outlives the syslog connection. `openlog` does NOT
-    /// copy its `ident` argument; dropping the storage early would
-    /// dangle the pointer the syslog client retains.
-    _ident: std::ffi::CString,
     priority: i32,
 }
 
 #[cfg(unix)]
 impl SyslogSink {
     /// Open a syslog connection with `ident` (program name shown in
-    /// log entries) and the default `LOG_INFO | LOG_USER` priority.
+    /// log entries). Default priority: `LOG_INFO | LOG_USER`.
     ///
     /// Returns `Err` only if `ident` contains an interior NUL. The
     /// underlying `openlog(3)` is infallible — it does not perform
@@ -276,16 +295,18 @@ impl SyslogSink {
                 format!("syslog ident contains NUL: {e}"),
             )
         })?;
-        // SAFETY: `openlog` reads its `ident` argument by pointer for
-        // the life of the connection; we keep `cstr` owned in the
-        // returned struct so the pointer stays valid until `closelog`.
-        // `option = 0` and `facility = LOG_USER` are POSIX-defined
-        // constants, safe in any process state.
+        // The libc syslog client retains `ident` by pointer for the
+        // life of the connection. Leak the CString so the pointer
+        // stays valid for the process lifetime — see the type's
+        // doc-comment for the singleton rationale.
+        let leaked: &'static std::ffi::CStr = Box::leak(cstr.into_boxed_c_str());
+        // SAFETY: leaked.as_ptr() is valid for 'static; option = 0
+        // and facility = LOG_USER are POSIX-defined constants safe in
+        // any process state.
         unsafe {
-            libc::openlog(cstr.as_ptr(), 0, libc::LOG_USER);
+            libc::openlog(leaked.as_ptr(), 0, libc::LOG_USER);
         }
         Ok(Self {
-            _ident: cstr,
             priority: libc::LOG_INFO | libc::LOG_USER,
         })
     }
@@ -309,17 +330,6 @@ impl AuditSink for SyslogSink {
             unsafe {
                 libc::syslog(self.priority, c"%s".as_ptr(), c.as_ptr());
             }
-        }
-    }
-}
-
-#[cfg(unix)]
-impl Drop for SyslogSink {
-    fn drop(&mut self) {
-        // SAFETY: closelog is infallible and idempotent; safe to call
-        // even if openlog was never invoked.
-        unsafe {
-            libc::closelog();
         }
     }
 }

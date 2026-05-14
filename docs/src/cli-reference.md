@@ -237,10 +237,11 @@ hasp run -e TOKEN=aws-sm://us-east-1/prod/creds?field=api_key \
 - **All-or-nothing:** if any fetch fails, the child is never spawned
   and hasp returns the appropriate exit code (e.g. 2 for not-found).
 - **Duplicate keys** are refused at startup (exit code 1).
-- **TTY refusal:** stdout must not be a terminal when invoking `run`
-  — accidental use like `hasp run -- echo $DB_PASS` would expose
-  secrets in the terminal scroll buffer. Pass `--allow-tty` to
-  override for interactive debugging.
+- **TTY refusal:** neither stdout nor stderr may be a terminal when
+  invoking `run` — accidental use like `hasp run -- echo $DB_PASS`
+  would expose secrets in the terminal scroll buffer regardless of
+  which stream the child writes to. Pass `--allow-tty` to override
+  for interactive debugging.
 - **`/proc/<pid>/environ` visibility:** on Linux, same-uid processes
   can read a child's environment via `/proc/<pid>/environ`. This is
   the inherent cost of env injection. For the highest-isolation

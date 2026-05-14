@@ -203,6 +203,57 @@ fn list_glob_excludes_symlinks_by_default() {
     }
 }
 
+#[cfg(unix)]
+#[test]
+fn list_glob_does_not_follow_symlinked_directory_mid_pattern() {
+    // Regression: a symlinked subdirectory pointing outside the
+    // pattern root must not redirect a `**` traversal. With
+    // ?follow_symlinks=0 (default), files reached through such a
+    // symlink must be filtered.
+    let inside = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let outside_secret = outside.path().join("escape.key");
+    std::fs::write(&outside_secret, "should-not-leak").unwrap();
+
+    let symlinked_dir = inside.path().join("legit");
+    std::os::unix::fs::symlink(outside.path(), &symlinked_dir).unwrap();
+
+    let backend = FileBackend;
+    let pattern = format!("{}/**/*.key", inside.path().display());
+    let url = Url::parse(&format!("file://{pattern}")).unwrap();
+    let entries = backend.list(&url).unwrap();
+
+    // The escape file at /outside/escape.key must NOT appear in the
+    // results even though `inside/legit/escape.key` matches the glob
+    // through the symlinked subdir.
+    for e in &entries {
+        assert!(
+            !e.name.contains("escape.key"),
+            "symlinked subdirectory leaked path outside pattern root: {entries:?}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn list_glob_follows_symlinked_dir_when_explicitly_opted_in() {
+    let inside = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let outside_secret = outside.path().join("via-symlink.key");
+    std::fs::write(&outside_secret, "ok").unwrap();
+    let symlinked_dir = inside.path().join("linked");
+    std::os::unix::fs::symlink(outside.path(), &symlinked_dir).unwrap();
+
+    let backend = FileBackend;
+    let pattern = format!("{}/**/*.key", inside.path().display());
+    let url = Url::parse(&format!("file://{pattern}?follow_symlinks=1")).unwrap();
+    let entries = backend.list(&url).unwrap();
+    assert!(
+        entries.iter().any(|e| e.name.contains("via-symlink.key")),
+        "follow_symlinks=1 should expose files through symlinked dirs: {entries:?}"
+    );
+}
+
 #[test]
 fn list_entries_are_directly_gettable() {
     let dir = tempfile::tempdir().unwrap();

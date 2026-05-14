@@ -25,13 +25,7 @@ fn run_injects_env_and_inherits_exit_zero() {
     let _g = EnvGuard::set("HASP_RUN_SRC", "hello-from-hasp");
 
     let out = hasp()
-        .args([
-            "run",
-            "-e",
-            "INJECTED=env://HASP_RUN_SRC",
-            "--",
-            "/usr/bin/env",
-        ])
+        .args(["run", "-e", "INJECTED=env://HASP_RUN_SRC", "--", "env"])
         .output()
         .unwrap();
 
@@ -50,7 +44,7 @@ fn run_injects_env_and_inherits_exit_zero() {
 #[test]
 fn run_propagates_child_exit_code() {
     let out = hasp()
-        .args(["run", "--", "/bin/sh", "-c", "exit 42"])
+        .args(["run", "--", "sh", "-c", "exit 42"])
         .output()
         .unwrap();
     assert_eq!(
@@ -78,7 +72,7 @@ fn run_short_circuits_on_missing_secret() {
             "-e",
             "X=env://HASP_RUN_MISSING",
             "--",
-            "/usr/bin/touch",
+            "touch",
             sentinel.to_str().unwrap(),
         ])
         .output()
@@ -135,7 +129,7 @@ fn run_umbrella_scheme_is_multi_when_schemes_differ() {
             "-e",
             &format!("B={}", file_url.as_str()),
             "--",
-            "/usr/bin/true",
+            "true",
         ])
         .output()
         .unwrap();
@@ -174,7 +168,7 @@ fn run_refuses_duplicate_env_keys() {
             "-e",
             "DUP=env://HASP_RUN_DUP",
             "--",
-            "/usr/bin/true",
+            "true",
         ])
         .output()
         .unwrap();
@@ -186,7 +180,7 @@ fn run_refuses_duplicate_env_keys() {
 #[test]
 fn run_refuses_malformed_env_spec() {
     let out = hasp()
-        .args(["run", "-e", "NO_EQUALS_SIGN", "--", "/usr/bin/true"])
+        .args(["run", "-e", "NO_EQUALS_SIGN", "--", "true"])
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(1));
@@ -208,7 +202,7 @@ fn run_emits_run_start_and_done_audit_events() {
     let _g = EnvGuard::set("HASP_RUN_AUDIT", "v");
 
     let out = hasp()
-        .args(["run", "-e", "K=env://HASP_RUN_AUDIT", "--", "/usr/bin/true"])
+        .args(["run", "-e", "K=env://HASP_RUN_AUDIT", "--", "true"])
         .output()
         .unwrap();
     assert!(out.status.success());
@@ -233,7 +227,7 @@ fn run_emits_run_start_and_done_audit_events() {
 #[test]
 fn run_done_outcome_child_nonzero_on_nonzero_exit() {
     let out = hasp()
-        .args(["run", "--", "/bin/sh", "-c", "exit 3"])
+        .args(["run", "--", "sh", "-c", "exit 3"])
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(3));

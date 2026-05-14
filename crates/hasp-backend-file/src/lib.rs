@@ -137,6 +137,19 @@ impl Backend for FileBackend {
             .to_str()
             .ok_or_else(|| Error::InvalidUrl("file:// path is not valid UTF-8".into()))?;
 
+        // Containment root: the longest path prefix of `pattern` that
+        // contains no glob metacharacters. When `follow_symlinks =
+        // false` we require every returned path's canonical form to
+        // remain under the canonical root, which closes the
+        // symlink-directory-mid-pattern escape the leaf
+        // `symlink_metadata` check below does NOT cover. (`glob`'s
+        // `**` traversal follows symlinked directories regardless.)
+        let canon_root = if !file_url.follow_symlinks {
+            literal_prefix(pattern).and_then(|p| std::fs::canonicalize(p).ok())
+        } else {
+            None
+        };
+
         let mut entries = Vec::new();
         let glob_opts = glob::MatchOptions {
             case_sensitive: true,
@@ -153,11 +166,23 @@ impl Backend for FileBackend {
                 message: format!("glob traversal error: {e}"),
             })?;
 
-            // Symlink filter: skip symlinks unless follow_symlinks is set.
+            // Leaf symlink filter: skip if the leaf itself is a symlink.
             if !file_url.follow_symlinks {
                 if let Ok(meta) = std::fs::symlink_metadata(&path) {
                     if meta.file_type().is_symlink() {
                         continue;
+                    }
+                }
+                // Containment: reject any candidate whose resolved
+                // canonical form is outside the canonical pattern
+                // root. Catches symlinked subdirectories that `glob`'s
+                // `**` traversal silently followed. If we cannot
+                // canonicalize either side, drop the candidate — safer
+                // to under-report than to leak an escape.
+                if let Some(root) = &canon_root {
+                    match std::fs::canonicalize(&path) {
+                        Ok(canon) if canon.starts_with(root) => {}
+                        _ => continue,
                     }
                 }
             }
@@ -194,6 +219,17 @@ impl Backend for FileBackend {
         let file_url = FileUrl::try_from(url)?;
         Ok(file_url.path.exists())
     }
+}
+
+/// Return the longest leading directory of `pattern` that contains no
+/// glob metacharacter (`*`, `?`, `[`). Used as the containment root
+/// for `list` so symlinked subdirectories cannot redirect a `**`
+/// traversal outside the user-named tree.
+fn literal_prefix(pattern: &str) -> Option<std::path::PathBuf> {
+    let stop = pattern.find(['*', '?', '[']).unwrap_or(pattern.len());
+    let head = &pattern[..stop];
+    let last_sep = head.rfind('/')?;
+    Some(std::path::PathBuf::from(&head[..=last_sep]))
 }
 
 /// Strips exactly one trailing `\r\n` or `\n` from the given string.

@@ -77,12 +77,14 @@ pub fn run(
     // explicitly opts in. The default exists because the common
     // accidental pattern `hasp run -- echo $DB_PASS` echoes the secret
     // to the user's terminal (and scroll buffer / tmux capture / SSH
-    // recording). Scripted callers piping stdout already pass this
-    // check; only interactive misuse is blocked.
-    if !allow_tty && std::io::stdout().is_terminal() {
+    // recording). Scripted callers piping stdio already pass this
+    // check; only interactive misuse is blocked. Both stdout and
+    // stderr are checked — a child writing the value to stderr in an
+    // interactive shell is just as exposed as one writing to stdout.
+    if !allow_tty && (std::io::stdout().is_terminal() || std::io::stderr().is_terminal()) {
         return Err(precondition_err(
-            "refusing to run with stdout attached to a TTY; pass --allow-tty to override \
-             (printed values may end up in your terminal scroll buffer or recording)"
+            "refusing to run with stdout or stderr attached to a TTY; pass --allow-tty to \
+             override (printed values may end up in your terminal scroll buffer or recording)"
                 .into(),
         ));
     }
