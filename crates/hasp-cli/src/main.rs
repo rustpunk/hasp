@@ -43,6 +43,11 @@ enum Command {
         /// URL or alias (`@profile/key`) of the secret.
         #[arg(value_hint = ValueHint::AnyPath, add = ArgValueCompleter::new(completions::complete_address))]
         address: String,
+        /// Extract a single field from a JSON-encoded secret payload.
+        /// Sugar for `?field=<path>` on the URL; refused if the URL
+        /// already carries `?field=`.
+        #[arg(short = 'F', long)]
+        field: Option<String>,
     },
     /// Store a secret.
     Put {
@@ -155,25 +160,42 @@ fn main() {
     // here — a future `--verbose-hardening` flag could surface them.
     if let Err(e) = hasp::harden_process() {
         eprintln!("hasp: {e}");
-        std::process::exit(1);
+        std::process::exit(EXIT_USAGE);
     }
 
     let cli = Cli::parse();
 
-    if let Err(e) = run(cli) {
-        eprintln!("{e}");
-        std::process::exit(1);
+    if let Err((code, msg)) = run(cli) {
+        eprintln!("{msg}");
+        std::process::exit(code);
     }
 }
 
-fn run(cli: Cli) -> Result<(), String> {
+// Exit-code convention. Documented in `docs/src/cli-reference.md`.
+// Mapped from `hasp::Error` variants by `exit_code()`. Soft breaking
+// change from the prior 0/1-only behavior; scripts that grep on a
+// specific non-zero must migrate.
+const EXIT_SUCCESS: i32 = 0;
+const EXIT_USAGE: i32 = 1;
+const EXIT_NOT_FOUND: i32 = 2;
+const EXIT_PERMISSION_DENIED: i32 = 3;
+const EXIT_TRANSPORT: i32 = 4;
+const EXIT_AUTH_FAILED: i32 = 5;
+const EXIT_PRECONDITION: i32 = 6;
+// Permanent backend failure that doesn't fit a more-specific code
+// (e.g. unexpected 4xx, malformed response). Distinct from EXIT_USAGE
+// so scripted callers can distinguish a flag mistake from a backend
+// returning something unexpected.
+const EXIT_BACKEND: i32 = 7;
+
+fn run(cli: Cli) -> Result<(), (i32, String)> {
     // Init does not need profiles or a store.
     if let Command::Init { force } = &cli.command {
-        return config_init::init(*force);
+        return config_init::init(*force).map_err(usage_err);
     }
 
-    let profiles =
-        profiles::load_profiles().map_err(|e| format!("failed to load profiles: {e}"))?;
+    let profiles = profiles::load_profiles()
+        .map_err(|e| usage_err(format!("failed to load profiles: {e}")))?;
 
     let proxy = resolve_proxy(&cli, &profiles)?;
     let store = hasp::StoreBuilder::with_defaults().proxy(proxy).build();
@@ -183,8 +205,11 @@ fn run(cli: Cli) -> Result<(), String> {
     if cli.explain && !matches!(cli.command, Command::Cp { .. }) {
         let address = command_address(&cli);
         if let Some(addr) = address {
-            let url = resolve(addr, &profiles)?;
-            let (_scheme, backend_scheme, cached) = store.resolve(&url).map_err(fmt_error)?;
+            let mut url = resolve(addr, &profiles)?;
+            if let Some(path) = command_field(&cli) {
+                url = compose_field(&url, path)?;
+            }
+            let (_scheme, backend_scheme, cached) = store.resolve(&url).map_err(cli_error)?;
             eprintln!("URL:         {url}");
             eprintln!("Backend:     {backend_scheme}");
             eprintln!("Cache:       {}", if cached { "hit" } else { "miss" });
@@ -194,12 +219,15 @@ fn run(cli: Cli) -> Result<(), String> {
     }
 
     match cli.command {
-        Command::Get { address } => {
+        Command::Get { address, field } => {
             if cli.verbose > 0 && !cli.quiet {
                 eprintln!("hasp: get {address}");
             }
-            let url = resolve(&address, &profiles)?;
-            let secret = store.get(&url).map_err(fmt_error)?;
+            let mut url = resolve(&address, &profiles)?;
+            if let Some(path) = field.as_deref() {
+                url = compose_field(&url, path)?;
+            }
+            let secret = store.get(&url).map_err(cli_error)?;
             println!("{}", secret.expose_secret());
         }
         Command::Put { address, value } => {
@@ -207,17 +235,17 @@ fn run(cli: Cli) -> Result<(), String> {
                 eprintln!("hasp: put {address}");
             }
             let url = resolve(&address, &profiles)?;
-            let value = read_value(value)?;
+            let value = read_value(value).map_err(usage_err)?;
             let secret = secrecy::SecretString::new(value.into());
-            store.put(&url, &secret).map_err(fmt_error)?;
+            store.put(&url, &secret).map_err(cli_error)?;
         }
         Command::List { address, format } => {
             if cli.verbose > 0 && !cli.quiet {
                 eprintln!("hasp: list {address}");
             }
             let url = resolve(&address, &profiles)?;
-            let entries = store.list(&url).map_err(fmt_error)?;
-            let output = format_list(&entries, format)?;
+            let entries = store.list(&url).map_err(cli_error)?;
+            let output = format_list(&entries, format).map_err(usage_err)?;
             if !output.is_empty() {
                 println!("{output}");
             }
@@ -227,15 +255,19 @@ fn run(cli: Cli) -> Result<(), String> {
                 eprintln!("hasp: delete {address}");
             }
             let url = resolve(&address, &profiles)?;
-            store.delete(&url).map_err(fmt_error)?;
+            store.delete(&url).map_err(cli_error)?;
         }
         Command::Exists { address } => {
             if cli.verbose > 0 && !cli.quiet {
                 eprintln!("hasp: exists {address}");
             }
             let url = resolve(&address, &profiles)?;
-            let exists = store.exists(&url).map_err(fmt_error)?;
-            std::process::exit(if exists { 0 } else { 1 });
+            // `exists` preserves 0/1 boolean semantics: 0 = present,
+            // 1 = absent. Backend errors flow through the standard
+            // mapping (auth=5, transport=4, etc.) so callers can still
+            // distinguish "key missing" from "could not check".
+            let exists = store.exists(&url).map_err(cli_error)?;
+            std::process::exit(if exists { EXIT_SUCCESS } else { EXIT_USAGE });
         }
         Command::Cp {
             src,
@@ -269,19 +301,19 @@ fn run(cli: Cli) -> Result<(), String> {
                     if p.starts_with("http://")
                         && std::env::var_os("HASP_ALLOW_HTTP_PROXY").is_none()
                     {
-                        return Err(format!(
+                        return Err(precondition_err(format!(
                             "refusing hasp cp through a plain-http proxy ({p} via {var}); \
                              set HASP_ALLOW_HTTP_PROXY=1 to override"
-                        ));
+                        )));
                     }
                 }
             }
             if let Some(p) = &cli.proxy_url {
                 if p.starts_with("http://") && std::env::var_os("HASP_ALLOW_HTTP_PROXY").is_none() {
-                    return Err(format!(
+                    return Err(precondition_err(format!(
                         "refusing hasp cp through a plain-http proxy ({p}); \
                          set HASP_ALLOW_HTTP_PROXY=1 to override"
-                    ));
+                    )));
                 }
             }
 
@@ -296,10 +328,10 @@ fn run(cli: Cli) -> Result<(), String> {
                     profile_environment(&dst, &profiles),
                 ) {
                     if s_env != d_env {
-                        return Err(format!(
+                        return Err(precondition_err(format!(
                             "refusing cross-environment copy: src='{s_env}' dst='{d_env}'; \
                              pass --yes to confirm"
-                        ));
+                        )));
                     }
                 }
             }
@@ -362,10 +394,10 @@ fn run(cli: Cli) -> Result<(), String> {
                     emit_audit("cp.done", &src_scheme, &dst_scheme, "error", Some(kind));
                 }
             }
-            outcome_result.map_err(fmt_error)?;
+            outcome_result.map_err(cli_error)?;
         }
         Command::Init { force } => {
-            config_init::init(force)?;
+            config_init::init(force).map_err(usage_err)?;
         }
         Command::Complete { shell } => {
             let mut app = Cli::command();
@@ -377,11 +409,11 @@ fn run(cli: Cli) -> Result<(), String> {
             let man = clap_mangen::Man::new(app);
             let mut buf = Vec::new();
             man.render(&mut buf)
-                .map_err(|e| format!("failed to render man page: {e}"))?;
+                .map_err(|e| usage_err(format!("failed to render man page: {e}")))?;
             if !cli.quiet {
                 io::stdout()
                     .write_all(&buf)
-                    .map_err(|e| format!("failed to write man page: {e}"))?;
+                    .map_err(|e| usage_err(format!("failed to write man page: {e}")))?;
             }
         }
     }
@@ -392,11 +424,11 @@ fn run(cli: Cli) -> Result<(), String> {
 ///
 /// If the address starts with `@`, look it up in the profile resolver.
 /// Otherwise return it unchanged, validating that it looks like a URL.
-fn resolve(address: &str, profiles: &profiles::Profiles) -> Result<String, String> {
+fn resolve(address: &str, profiles: &profiles::Profiles) -> Result<String, (i32, String)> {
     if let Some(rest) = address.strip_prefix('@') {
         let url = profiles
             .resolve(rest)
-            .ok_or_else(|| format!("unknown profile alias: @{rest}"))?;
+            .ok_or_else(|| usage_err(format!("unknown profile alias: @{rest}")))?;
         Ok(url)
     } else {
         Ok(address.to_owned())
@@ -412,12 +444,12 @@ fn resolve(address: &str, profiles: &profiles::Profiles) -> Result<String, Strin
 fn resolve_proxy(
     cli: &Cli,
     profiles: &profiles::Profiles,
-) -> Result<Option<hasp::ProxyConfig>, String> {
+) -> Result<Option<hasp::ProxyConfig>, (i32, String)> {
     // Layer 1: CLI flag.
     if let Some(raw) = &cli.proxy_url {
         return hasp::ProxyConfig::parse(raw)
             .map(Some)
-            .map_err(|e| format!("invalid --proxy-url: {e}"));
+            .map_err(|e| usage_err(format!("invalid --proxy-url: {e}")));
     }
 
     // Layer 2: profile `proxy_url`.
@@ -426,9 +458,11 @@ fn resolve_proxy(
         if let Some(rest) = address.strip_prefix('@') {
             let profile_name = rest.split_once('/').map(|(p, _)| p).unwrap_or(rest);
             if let Some(raw) = profiles.proxy_url(profile_name) {
-                return hasp::ProxyConfig::parse(&raw)
-                    .map(Some)
-                    .map_err(|e| format!("invalid proxy_url in profile '{profile_name}': {e}"));
+                return hasp::ProxyConfig::parse(&raw).map(Some).map_err(|e| {
+                    usage_err(format!(
+                        "invalid proxy_url in profile '{profile_name}': {e}"
+                    ))
+                });
             }
         }
     }
@@ -437,13 +471,21 @@ fn resolve_proxy(
     Ok(None)
 }
 
+/// Extract the `--field` flag value for verbs that support it.
+fn command_field(cli: &Cli) -> Option<&str> {
+    match &cli.command {
+        Command::Get { field, .. } => field.as_deref(),
+        _ => None,
+    }
+}
+
 /// Extract the primary address argument from the current CLI command.
 ///
 /// Returns `None` for `cp` because `cp` has two addresses and handles
 /// `--explain` inside its own arm rather than the shared early branch.
 fn command_address(cli: &Cli) -> Option<&str> {
     match &cli.command {
-        Command::Get { address }
+        Command::Get { address, .. }
         | Command::Put { address, .. }
         | Command::List { address, .. }
         | Command::Delete { address }
@@ -471,7 +513,7 @@ fn command_verb(cli: &Cli) -> &'static str {
 /// resolution.
 fn command_addresses(cli: &Cli) -> Vec<&str> {
     match &cli.command {
-        Command::Get { address } => vec![address.as_str()],
+        Command::Get { address, .. } => vec![address.as_str()],
         Command::Put { address, .. } => vec![address.as_str()],
         Command::List { address, .. } => vec![address.as_str()],
         Command::Delete { address } => vec![address.as_str()],
@@ -532,6 +574,69 @@ fn emit_audit(
     if let Ok(line) = serde_json::to_string(&serde_json::Value::Object(obj)) {
         let _ = writeln!(io::stderr(), "{line}");
     }
+}
+
+/// CLI exit-code mapping for library errors. Exit codes are CLI policy,
+/// not library policy — `hasp_core::Error` carries variant info only.
+fn exit_code(err: &hasp::Error) -> i32 {
+    use hasp::BackendFailureKind;
+    match err {
+        hasp::Error::UrlParse(_)
+        | hasp::Error::InvalidUrl(_)
+        | hasp::Error::UnknownScheme(_)
+        | hasp::Error::UnsupportedOperation { .. } => EXIT_USAGE,
+        hasp::Error::NotFound(_) => EXIT_NOT_FOUND,
+        hasp::Error::PermissionDenied(_) => EXIT_PERMISSION_DENIED,
+        hasp::Error::AuthenticationFailed(_) => EXIT_AUTH_FAILED,
+        hasp::Error::PreconditionFailed(_) => EXIT_PRECONDITION,
+        hasp::Error::Backend {
+            kind: BackendFailureKind::Transient | BackendFailureKind::Throttled,
+            ..
+        } => EXIT_TRANSPORT,
+        hasp::Error::Backend {
+            kind: BackendFailureKind::Permanent,
+            ..
+        } => EXIT_BACKEND,
+        // Future-added variants (Error is #[non_exhaustive]) fall through
+        // to usage rather than be misclassified.
+        _ => EXIT_USAGE,
+    }
+}
+
+/// Combine `exit_code` and `fmt_error` into the pair propagated by `run`.
+fn cli_error(err: hasp::Error) -> (i32, String) {
+    let code = exit_code(&err);
+    let message = fmt_error(err);
+    (code, message)
+}
+
+/// Wrap a `String` CLI-policy error (usage, IO, config parse) as code 1.
+fn usage_err(message: String) -> (i32, String) {
+    (EXIT_USAGE, message)
+}
+
+/// Wrap a CLI-policy refusal (cross-env, plain-http proxy, self-copy)
+/// as code 6 (precondition). The refusal originates in the CLI rather
+/// than the library, but maps onto the same semantic — "preconditions
+/// for this operation are not met."
+fn precondition_err(message: String) -> (i32, String) {
+    (EXIT_PRECONDITION, message)
+}
+
+/// Append `?field=<path>` (URL-encoded) to an address.
+///
+/// Refuses if the URL already carries `?field=` to keep `-F` and the
+/// query-param form unambiguous — silently overriding either direction
+/// would surprise users scripting on top of the URL.
+fn compose_field(url: &str, path: &str) -> Result<String, (i32, String)> {
+    let mut parsed = url::Url::parse(url).map_err(|e| usage_err(format!("invalid URL: {e}")))?;
+    if parsed.query_pairs().any(|(k, _)| k == "field") {
+        return Err(usage_err(
+            "URL already specifies ?field=; -F/--field would conflict".into(),
+        ));
+    }
+    parsed.query_pairs_mut().append_pair("field", path);
+    Ok(parsed.into())
 }
 
 /// Stable classifier for `hasp::Error` variants. Used in audit events
@@ -633,5 +738,142 @@ fn fmt_error(err: hasp::Error) -> String {
             _ => format!("backend '{scheme}' failed: {message}"),
         },
         _ => err.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hasp::BackendFailureKind;
+
+    #[test]
+    fn exit_code_url_parse() {
+        let err = url::Url::parse("not a url").unwrap_err();
+        assert_eq!(exit_code(&hasp::Error::UrlParse(err)), EXIT_USAGE);
+    }
+
+    #[test]
+    fn exit_code_invalid_url() {
+        assert_eq!(
+            exit_code(&hasp::Error::InvalidUrl("bad".into())),
+            EXIT_USAGE
+        );
+    }
+
+    #[test]
+    fn exit_code_unknown_scheme() {
+        assert_eq!(
+            exit_code(&hasp::Error::UnknownScheme("foo".into())),
+            EXIT_USAGE
+        );
+    }
+
+    #[test]
+    fn exit_code_unsupported_operation() {
+        assert_eq!(
+            exit_code(&hasp::Error::UnsupportedOperation {
+                scheme: "env",
+                operation: "put"
+            }),
+            EXIT_USAGE
+        );
+    }
+
+    #[test]
+    fn exit_code_not_found() {
+        assert_eq!(
+            exit_code(&hasp::Error::NotFound("x".into())),
+            EXIT_NOT_FOUND
+        );
+    }
+
+    #[test]
+    fn exit_code_permission_denied() {
+        assert_eq!(
+            exit_code(&hasp::Error::PermissionDenied("x".into())),
+            EXIT_PERMISSION_DENIED
+        );
+    }
+
+    #[test]
+    fn exit_code_auth_failed() {
+        assert_eq!(
+            exit_code(&hasp::Error::AuthenticationFailed("x".into())),
+            EXIT_AUTH_FAILED
+        );
+    }
+
+    #[test]
+    fn exit_code_precondition_failed() {
+        assert_eq!(
+            exit_code(&hasp::Error::PreconditionFailed("x".into())),
+            EXIT_PRECONDITION
+        );
+    }
+
+    #[test]
+    fn exit_code_backend_transient() {
+        assert_eq!(
+            exit_code(&hasp::Error::Backend {
+                scheme: "vault",
+                kind: BackendFailureKind::Transient,
+                message: "timeout".into(),
+            }),
+            EXIT_TRANSPORT
+        );
+    }
+
+    #[test]
+    fn exit_code_backend_throttled() {
+        assert_eq!(
+            exit_code(&hasp::Error::Backend {
+                scheme: "aws-sm",
+                kind: BackendFailureKind::Throttled,
+                message: "429".into(),
+            }),
+            EXIT_TRANSPORT
+        );
+    }
+
+    #[test]
+    fn exit_code_backend_permanent() {
+        assert_eq!(
+            exit_code(&hasp::Error::Backend {
+                scheme: "gcp-sm",
+                kind: BackendFailureKind::Permanent,
+                message: "418".into(),
+            }),
+            EXIT_BACKEND
+        );
+    }
+
+    #[test]
+    fn compose_field_appends_query() {
+        let out = compose_field("vault://kv/data/app", "password").unwrap();
+        // url crate normalizes the trailing slash; check the suffix.
+        assert!(out.ends_with("?field=password"), "got: {out}");
+    }
+
+    #[test]
+    fn compose_field_appends_to_existing_query() {
+        let out = compose_field("vault://kv/data/app?version=2", "password").unwrap();
+        assert!(
+            out.contains("version=2") && out.contains("field=password"),
+            "got: {out}"
+        );
+    }
+
+    #[test]
+    fn compose_field_encodes_special_chars() {
+        // url::Url::query_pairs_mut percent-encodes spaces as `+`.
+        let out = compose_field("vault://kv/data/app", "with space").unwrap();
+        assert!(out.contains("field=with+space"), "got: {out}");
+    }
+
+    #[test]
+    fn compose_field_refuses_double_spec() {
+        let err = compose_field("vault://kv/data/app?field=already", "password").unwrap_err();
+        assert_eq!(err.0, EXIT_USAGE);
+        assert!(err.1.contains("already specifies ?field="));
     }
 }

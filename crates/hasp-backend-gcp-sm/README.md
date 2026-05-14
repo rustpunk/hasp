@@ -5,12 +5,15 @@
 ## URL Grammar
 
 ```
-gcp-sm://<project-id>/<secret-id>?version=<version>
+gcp-sm://<project-id>/<secret-id>?version=<version>&field=<path>
 ```
 
 - `<project-id>` — GCP project identifier (host). Must be non-empty.
 - `<secret-id>`  — Secret ID (path). Must match `^[a-zA-Z0-9-_]{1,255}$` per GCP. Leading `/` is stripped.
 - `?version=<version>` — Optional version label. Defaults to `latest`.
+- `?field=<path>` — Optional dotted JSON path (`password`, `.creds.api_key`).
+  When set, the decoded secret value is parsed as JSON and the named scalar is
+  returned. Non-JSON payloads fail with `InvalidUrl`. CLI sugar: `-F <path>`.
 
 Examples:
 

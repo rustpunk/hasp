@@ -167,6 +167,10 @@ impl Backend for BwBackend {
         "bw"
     }
 
+    fn validate(&self, url: &Url) -> Result<(), Error> {
+        BwUrl::try_from(url).map(|_| ())
+    }
+
     fn get(&self, url: &Url) -> Result<SecretString, Error> {
         self.ensure_init()?;
         check_ambient_credentials()?;

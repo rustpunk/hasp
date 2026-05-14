@@ -1,10 +1,14 @@
 //! `gcp-sm://` backend for hasp.
 //!
-//! Grammar: `gcp-sm://<project-id>/<secret-id>?version=<version>`
+//! Grammar: `gcp-sm://<project-id>/<secret-id>?version=<version>&field=<path>`
 //!   - `<project-id>` — GCP project identifier (host). Must be non-empty.
 //!   - `<secret-id>`  — Secret ID (path). Identifiers must match
 //!     `^[a-zA-Z0-9-_]{1,255}$` per GCP. Leading `/` is stripped.
 //!   - `?version`     — Optional version label. Defaults to `latest`.
+//!   - `?field`       — Optional dotted JSON path. When set, the
+//!     decoded secret value is parsed as JSON and the named scalar is
+//!     returned (see `hasp_core::extract_field`). Non-JSON payloads
+//!     fail with `InvalidUrl`.
 //!
 //! Supported operations: `get`, `put`, `list`, `delete`, `exists`.
 //!
@@ -28,6 +32,7 @@ pub struct GcpSmUrl {
     pub project_id: String,
     pub secret_id: String,
     pub version: String,
+    pub field: Option<String>,
 }
 
 impl TryFrom<&Url> for GcpSmUrl {
@@ -51,10 +56,12 @@ impl TryFrom<&Url> for GcpSmUrl {
         let secret_id = url.path().trim_start_matches('/').to_owned();
 
         let mut version = String::from("latest");
+        let mut field = None;
 
         for (k, v) in url.query_pairs() {
             match k.as_ref() {
                 "version" => version = v.into_owned(),
+                "field" => field = Some(v.into_owned()),
                 _ => {
                     return Err(Error::InvalidUrl(format!(
                         "gcp-sm:// unknown query parameter: {k}"
@@ -67,6 +74,7 @@ impl TryFrom<&Url> for GcpSmUrl {
             project_id,
             secret_id,
             version,
+            field,
         })
     }
 }
@@ -181,6 +189,10 @@ impl Backend for GcpSmBackend {
         Self::SCHEME
     }
 
+    fn validate(&self, url: &Url) -> Result<(), Error> {
+        GcpSmUrl::try_from(url).map(|_| ())
+    }
+
     fn get(&self, url: &Url) -> Result<SecretString, Error> {
         let gcp_url = GcpSmUrl::try_from(url)?;
         if gcp_url.secret_id.is_empty() {
@@ -242,7 +254,14 @@ impl Backend for GcpSmBackend {
             message: format!("secret value is not valid UTF-8: {e}"),
         })?;
 
-        Ok(SecretString::new(text.into()))
+        // Field extraction runs on the parsed JSON before wrapping in
+        // `SecretString` — the parent payload never escapes this function
+        // as a plaintext `String`.
+        let value = match &gcp_url.field {
+            Some(path) => hasp_core::extract_field_from_str(&text, path)?,
+            None => text,
+        };
+        Ok(SecretString::new(value.into()))
     }
 
     fn put(&self, url: &Url, value: &SecretString) -> Result<(), Error> {
@@ -571,6 +590,14 @@ mod tests {
     }
 
     #[test]
+    fn parse_valid_url_with_field() {
+        let url = Url::parse("gcp-sm://my-project/my-secret?field=.creds.password").unwrap();
+        let gcp = GcpSmUrl::try_from(&url).unwrap();
+        assert_eq!(gcp.field, Some(".creds.password".into()));
+        assert_eq!(gcp.version, "latest");
+    }
+
+    #[test]
     fn parse_missing_host_fails() {
         let url = Url::parse("gcp-sm:///my-secret").unwrap();
         assert!(GcpSmUrl::try_from(&url).is_err());
@@ -718,5 +745,29 @@ mod tests {
     fn backend_scheme() {
         let backend = GcpSmBackend::new();
         assert_eq!(backend.scheme(), "gcp-sm");
+    }
+
+    // GCP returns secret bytes base64-decoded by get(); the post-decode
+    // UTF-8 string is the JSON payload the user stored. These tests
+    // exercise the shared helper on representative payloads.
+    #[test]
+    fn field_extraction_happy() {
+        let payload = r#"{"db":{"password":"hunter2"}}"#;
+        let v = hasp_core::extract_field_from_str(payload, ".db.password").unwrap();
+        assert_eq!(v, "hunter2");
+    }
+
+    #[test]
+    fn field_extraction_missing_field_is_not_found() {
+        let payload = r#"{"db":{}}"#;
+        let err = hasp_core::extract_field_from_str(payload, ".db.password").unwrap_err();
+        assert!(matches!(err, Error::NotFound(_)));
+    }
+
+    #[test]
+    fn field_extraction_non_json_is_invalid_url() {
+        let payload = "raw-bytes-not-json";
+        let err = hasp_core::extract_field_from_str(payload, "password").unwrap_err();
+        assert!(matches!(err, Error::InvalidUrl(_)));
     }
 }

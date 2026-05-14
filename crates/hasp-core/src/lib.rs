@@ -6,6 +6,7 @@
 //! those live in `hasp-cli`.
 
 pub mod error;
+pub mod field;
 pub mod hardening;
 pub mod proxy;
 pub mod retry;
@@ -14,6 +15,7 @@ pub mod retry;
 pub mod test_utils;
 
 pub use error::{BackendFailureKind, Error};
+pub use field::{extract_field, extract_field_from_str};
 pub use hardening::{
     apply_mitigations, check_refusal_conditions, harden_process, HardenRefusal, MitigationOutcome,
 };
@@ -71,6 +73,17 @@ pub trait Backend: Send + Sync {
 
     /// Returns `true` if a secret exists at the given URL.
     fn exists(&self, url: &Url) -> Result<bool, Error>;
+
+    /// Validate URL grammar without performing I/O.
+    ///
+    /// Backends override by delegating to their existing URL `TryFrom`.
+    /// Used by `Store::resolve` so `--explain` rejects the same URLs
+    /// `get` would — keeps the dry-run path honest about what an actual
+    /// operation would do. Default impl is a no-op for backends that
+    /// have no grammar to validate beyond the scheme.
+    fn validate(&self, _url: &Url) -> Result<(), Error> {
+        Ok(())
+    }
 }
 
 /// A named entry returned by `Backend::list`.

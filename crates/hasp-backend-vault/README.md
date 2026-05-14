@@ -10,12 +10,14 @@
 - `<path>` — secret path within the mount. For KV v2, include the `data/`
   prefix (e.g., `data/myapp/config`). For KV v1, use the path directly
   (e.g., `myapp/config`).
-- `?field=<key>` — optional key to extract from the JSON `data.data` object.
-  If omitted, the entire `data.data` object is serialized to JSON and returned.
+- `?field=<key>` — optional dotted JSON path into `data.data`. Supports both
+  flat keys (`password`) and dotted nested paths (`.credentials.api_key`).
+  Leading `.` is optional. If omitted, the entire `data.data` object is
+  serialized to JSON and returned. CLI sugar: `-F <path>`.
 
 Examples:
 - `vault://secret/data/myapp/config?field=password`
-- `vault://kv/data/prod/db?field=connection_string`
+- `vault://kv/data/prod/db?field=.connection.string`
 
 ## Supported Operations
 

@@ -379,6 +379,10 @@ impl Store {
             .get(parsed_url.scheme())
             .ok_or_else(|| Error::UnknownScheme(scheme.clone()))?;
 
+        // Validate per-backend URL grammar so `--explain` rejects the
+        // same URLs `get`/`put` would; the dry-run path must not lie.
+        backend.validate(&parsed_url)?;
+
         let cached = if let Some(ttl) = self.ttl {
             if let Ok(cache) = self.cache.read() {
                 cache

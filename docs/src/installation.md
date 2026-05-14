@@ -30,6 +30,39 @@ xattr -d com.apple.quarantine /usr/local/bin/hasp
 On Windows, drop `hasp.exe` somewhere on `%PATH%` (or run it from a
 folder you've added to `PATH`).
 
+## Verifying build provenance
+
+Every release artifact is published with a [SLSA v1.0](https://slsa.dev/)
+build attestation signed via GitHub OIDC and sigstore. The attestation
+proves the artifact was produced from a specific commit of
+`github.com/rustpunk/hasp` by the official release workflow — it
+defends against the supply-chain class demonstrated by the Bitwarden CLI
+npm compromise.
+
+The simplest verification is with the GitHub CLI:
+
+```bash
+gh attestation verify hasp-linux-x64.tar.gz \
+  --owner rustpunk
+```
+
+This queries the GitHub attestations API, fetches the signed bundle,
+and verifies the artifact's digest. No additional flags are needed —
+the workflow + commit + builder identity are all proven in one call.
+
+For offline / air-gapped verification, the sigstore bundle is published
+alongside each release artifact as `<asset>.intoto.jsonl`. Pass it to
+any sigstore-compatible verifier — see GitHub's
+[verifying attestations offline](https://docs.github.com/en/actions/security-for-github-actions/using-artifact-attestations/verifying-attestations-offline)
+guide for the current toolchain (`gh attestation verify --bundle` plus
+`--no-api`, or [`cosign verify-blob-attestation`](https://docs.sigstore.dev/cosign/verifying/attestation/)).
+
+The attestation establishes **Build L2** in the SLSA terminology: the
+build identity is verifiable, but the build environment is not
+isolated (hosted GitHub runners). It does **not** defend against a
+maintainer account compromise pushing a malicious release tag — that
+class requires SLSA L3 (isolation-of-build), which is deferred.
+
 ## From source
 
 Requires a stable Rust toolchain (install via [rustup](https://rustup.rs/)).
