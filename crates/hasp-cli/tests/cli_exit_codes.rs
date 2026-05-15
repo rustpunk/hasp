@@ -47,6 +47,9 @@ fn usage_unknown_profile_alias() {
     std::fs::write(&profile_path, "").unwrap();
     let out = hasp()
         .env("HASP_PROFILES_PATH", profile_path.as_os_str())
+        // Default-on profile-allow would mask the usage error; this test
+        // is about alias resolution, not trust enforcement.
+        .env("HASP_REQUIRE_PROFILE_ALLOW", "0")
         .args(["get", "@undefined/key"])
         .output()
         .unwrap();
@@ -147,6 +150,9 @@ db = "{}"
     .unwrap();
     let out = hasp()
         .env("HASP_PROFILES_PATH", profile_path.as_os_str())
+        // Default-on profile-allow would mask the cross-env precondition
+        // path; this test is about cross-environment refusal.
+        .env("HASP_REQUIRE_PROFILE_ALLOW", "0")
         .args(["cp", "@stage/db", "@prod/db"])
         .output()
         .unwrap();

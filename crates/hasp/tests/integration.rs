@@ -154,6 +154,73 @@ mod cache_tests {
         let second = store.get(&url).unwrap();
         assert_eq!(second.expose_secret(), "new-value");
     }
+
+    /// Capture-only AuditSink for testing the cache.hit / cache.miss
+    /// event emission. Records every event's `event` field — that's
+    /// the closed-string label, so no value bytes ever land here.
+    #[derive(Default)]
+    struct CaptureSink {
+        events: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl hasp::AuditSink for CaptureSink {
+        fn emit(&self, event: &hasp::AuditEvent) {
+            if let Ok(mut v) = self.events.lock() {
+                v.push(event.event.to_string());
+            }
+        }
+    }
+
+    #[test]
+    fn cache_hit_and_miss_audit_events_emit_in_order() {
+        use std::sync::Arc;
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = EnvGuard::set("HASP_CACHE_HM_TEST", "v");
+
+        let sink: Arc<CaptureSink> = Arc::new(CaptureSink::default());
+        let token = hasp::install_hardening().expect("hardening");
+        let store = Store::builder()
+            .with_cache_policy(hasp::CachePolicy::process_default(), token)
+            .with_audit_sink(sink.clone())
+            .register(hasp::env())
+            .build();
+
+        let _ = store.get("env://HASP_CACHE_HM_TEST").unwrap();
+        let _ = store.get("env://HASP_CACHE_HM_TEST").unwrap();
+
+        let events = sink.events.lock().unwrap().clone();
+        // First fetch: get.start, cache.miss, get.done.
+        // Second fetch: get.start, cache.hit, get.done.
+        assert!(
+            events.contains(&"cache.miss".to_string()),
+            "events = {events:?}"
+        );
+        assert!(
+            events.contains(&"cache.hit".to_string()),
+            "events = {events:?}"
+        );
+    }
+
+    #[test]
+    fn disabled_policy_emits_no_cache_events() {
+        use std::sync::Arc;
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = EnvGuard::set("HASP_CACHE_DIS_TEST", "v");
+
+        let sink: Arc<CaptureSink> = Arc::new(CaptureSink::default());
+        let token = hasp::install_hardening().expect("hardening");
+        let store = Store::builder()
+            .with_cache_policy(hasp::CachePolicy::Disabled, token)
+            .with_audit_sink(sink.clone())
+            .register(hasp::env())
+            .build();
+
+        let _ = store.get("env://HASP_CACHE_DIS_TEST").unwrap();
+        let _ = store.get("env://HASP_CACHE_DIS_TEST").unwrap();
+
+        let events = sink.events.lock().unwrap().clone();
+        assert!(!events.iter().any(|e| e.starts_with("cache.")));
+    }
 }
 
 #[cfg(not(feature = "file"))]
@@ -307,6 +374,72 @@ mod op_tests {
             matches!(err, hasp::Error::AuthenticationFailed(_)),
             "expected AuthenticationFailed when no ambient credentials are present, got {err:?}"
         );
+    }
+
+    #[test]
+    fn op_put_existing_item_succeeds() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _fake = FakeOpGuard::canonical();
+        let _env = EnvGuard::set("OP_SERVICE_ACCOUNT_TOKEN", "fake-token");
+
+        let store = Store::builder().register(hasp::op()).build();
+        let secret = hasp::SecretString::new("new-value".to_string().into());
+        store
+            .put("op://test-vault/test-item/field1", &secret)
+            .expect("put should succeed for existing item");
+    }
+
+    #[test]
+    fn op_put_falls_back_to_create_on_not_found() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _fake = FakeOpGuard::canonical();
+        let _env = EnvGuard::set("OP_SERVICE_ACCOUNT_TOKEN", "fake-token");
+
+        let store = Store::builder().register(hasp::op()).build();
+        let secret = hasp::SecretString::new("created".to_string().into());
+        // missing-item not in fake bin's known set; edit returns
+        // "could not find item" -> NotFound -> create fallback succeeds.
+        store
+            .put("op://test-vault/missing-item/password", &secret)
+            .expect("put should fall back to create");
+    }
+
+    #[test]
+    fn op_delete_existing_item_succeeds() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _fake = FakeOpGuard::canonical();
+        let _env = EnvGuard::set("OP_SERVICE_ACCOUNT_TOKEN", "fake-token");
+
+        let store = Store::builder().register(hasp::op()).build();
+        store
+            .delete("op://test-vault/test-item/field1")
+            .expect("delete should succeed for existing item");
+    }
+
+    #[test]
+    fn op_list_returns_entries() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _fake = FakeOpGuard::canonical();
+        let _env = EnvGuard::set("OP_SERVICE_ACCOUNT_TOKEN", "fake-token");
+
+        let store = Store::builder().register(hasp::op()).build();
+        let entries = store.list("op://test-vault").expect("list should succeed");
+        assert!(!entries.is_empty(), "expected at least one entry");
+        // Entry URL should be UUID-keyed when the JSON had an `id`.
+        assert!(entries
+            .iter()
+            .any(|e| e.url.as_str().contains("uuid-test-item")));
+    }
+
+    #[test]
+    fn op_list_missing_vault_returns_not_found() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _fake = FakeOpGuard::canonical();
+        let _env = EnvGuard::set("OP_SERVICE_ACCOUNT_TOKEN", "fake-token");
+
+        let store = Store::builder().register(hasp::op()).build();
+        let err = store.list("op://missing-vault").unwrap_err();
+        assert!(matches!(err, hasp::Error::NotFound(_)));
     }
 }
 

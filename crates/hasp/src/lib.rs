@@ -34,10 +34,11 @@
 #[cfg(unix)]
 pub use hasp_core::SyslogSink;
 pub use hasp_core::{
-    apply_mitigations, check_refusal_conditions, harden_process, scheme_from_url, AuditEvent,
-    AuditSink, Backend as BackendTrait, BackendFailureKind, Entry, Error, ExposeSecret, FileSink,
-    HardenRefusal, MitigationOutcome, NoopSink, ProxyConfig, RetryBackend, SecretString,
-    StderrSink, Verb,
+    apply_mitigations, check_refusal_conditions, harden_process, install as install_hardening,
+    scheme_from_url, AuditEvent, AuditSink, Backend as BackendTrait, BackendFailureKind,
+    CacheEvent, CacheKey, CachePolicy, Entry, Error, ExposeSecret, FileSink, HardenRefusal,
+    HardeningToken, MitigationOutcome, NoopSink, ProcessCache, ProxyConfig, RetryBackend,
+    SecretString, StderrSink, Verb,
 };
 
 #[cfg(feature = "aws-sm")]
@@ -72,8 +73,7 @@ pub use hasp_backend_azure_kv::AzureKvBackend;
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::RwLock;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use url::Url;
 
 pub type Backend = Arc<dyn hasp_core::Backend>;
@@ -146,13 +146,15 @@ pub fn azure_kv() -> Backend {
 /// Fluent builder for a [`Store`] with optional proxy configuration.
 ///
 /// Create a builder with `StoreBuilder::with_defaults()`, optionally
-/// call `.proxy(Some(config))` and `.cache_ttl(Some(Duration::from_secs(60)))`,
-/// then finish with `.build()`.
+/// call `.proxy(Some(config))` and
+/// `.with_cache_policy(CachePolicy::process_default(), token)`, then
+/// finish with `.build()`.
 pub struct StoreBuilder {
     proxy: Option<ProxyConfig>,
     defaults: bool,
     extra_backends: Vec<Backend>,
-    ttl: Option<Duration>,
+    policy: CachePolicy,
+    hardening_token: Option<HardeningToken>,
     retry: Option<(u32, Duration)>,
     audit_sink: Option<Arc<dyn AuditSink>>,
 }
@@ -164,7 +166,8 @@ impl StoreBuilder {
             proxy: None,
             defaults: false,
             extra_backends: Vec::new(),
-            ttl: None,
+            policy: CachePolicy::Disabled,
+            hardening_token: None,
             retry: None,
             audit_sink: None,
         }
@@ -177,7 +180,8 @@ impl StoreBuilder {
             proxy: None,
             defaults: true,
             extra_backends: Vec::new(),
-            ttl: None,
+            policy: CachePolicy::Disabled,
+            hardening_token: None,
             retry: None,
             audit_sink: None,
         }
@@ -189,9 +193,48 @@ impl StoreBuilder {
         self
     }
 
-    /// Set a TTL for the `Store` memoization cache. `None` disables caching.
+    /// Set a TTL for the `Store` memoization cache. `None` disables
+    /// caching.
+    ///
+    /// Ergonomic shorthand: attempts to install process hardening via
+    /// [`hasp_core::install`] when `ttl` is `Some`. On refusal (e.g.
+    /// `LD_PRELOAD` set), caching is silently disabled — the build
+    /// continues without a cache. Callers that require hardening to be
+    /// in place should use [`StoreBuilder::with_cache_policy`] directly.
     pub fn cache_ttl(mut self, ttl: Option<Duration>) -> Self {
-        self.ttl = ttl;
+        match ttl {
+            Some(ttl) => match hasp_core::install() {
+                Ok(token) => {
+                    self.policy = CachePolicy::Process {
+                        ttl,
+                        capacity: 1024,
+                    };
+                    self.hardening_token = Some(token);
+                }
+                Err(_) => {
+                    self.policy = CachePolicy::Disabled;
+                    self.hardening_token = None;
+                }
+            },
+            None => {
+                self.policy = CachePolicy::Disabled;
+                self.hardening_token = None;
+            }
+        }
+        self
+    }
+
+    /// Set a cache policy with an explicit hardening token.
+    ///
+    /// This is the architecturally correct path: caching cannot be
+    /// installed without a [`HardeningToken`] (witness of
+    /// `PR_SET_DUMPABLE=0`, `RLIMIT_CORE=0`, and env-injection
+    /// refusal). Library consumers that build their own hardening
+    /// discipline should call [`hasp_core::install`] and pass the
+    /// returned token here.
+    pub fn with_cache_policy(mut self, policy: CachePolicy, token: HardeningToken) -> Self {
+        self.policy = policy;
+        self.hardening_token = Some(token);
         self
     }
 
@@ -226,8 +269,10 @@ impl StoreBuilder {
     /// Build the final [`Store`].
     pub fn build(self) -> Store {
         let mut store = Store::empty();
-        store.ttl = self.ttl;
-        store.audit_sink = self.audit_sink;
+        store.audit_sink = self.audit_sink.clone();
+        if let Some(token) = self.hardening_token {
+            store.cache = ProcessCache::new(&self.policy, token, self.audit_sink);
+        }
 
         if self.defaults {
             register_default_backends(&mut store, &self.proxy, self.retry);
@@ -288,16 +333,10 @@ fn register_default_backends(
     store.register(wrap(Arc::new(AzureKvBackend::with_proxy(proxy.clone()))));
 }
 
-struct CacheEntry {
-    secret: SecretString,
-    fetched_at: Instant,
-}
-
 /// Batteries-included secret store.
 pub struct Store {
     backends: HashMap<&'static str, Backend>,
-    cache: RwLock<HashMap<String, CacheEntry>>,
-    ttl: Option<Duration>,
+    cache: Option<ProcessCache>,
     audit_sink: Option<Arc<dyn AuditSink>>,
 }
 
@@ -306,10 +345,16 @@ impl Store {
     pub fn empty() -> Self {
         Self {
             backends: HashMap::new(),
-            cache: RwLock::new(HashMap::new()),
-            ttl: None,
+            cache: None,
             audit_sink: None,
         }
+    }
+
+    /// Build a [`CacheKey`] for `(scheme, full URL string)`. The
+    /// scheme namespacing prevents the same URL string handled by two
+    /// backends from aliasing.
+    fn cache_key(scheme: &'static str, url: &str) -> CacheKey {
+        CacheKey::new(scheme, url)
     }
 
     /// Emit an audit event, if an `AuditSink` is installed.
@@ -364,6 +409,26 @@ impl Store {
         self.backends.insert(backend.scheme(), backend);
     }
 
+    /// Drop every cached entry. No-op if no cache is configured.
+    ///
+    /// Used by `hasp cache clear` and for surgical invalidation when a
+    /// library consumer rotates secrets out-of-band. Emits a single
+    /// `cache.clear` audit event with `src_scheme = "all"`.
+    pub fn clear_cache(&self) {
+        if let Some(cache) = &self.cache {
+            cache.invalidate_all();
+            self.audit(AuditEvent::cache(CacheEvent::Clear, "all"));
+        }
+    }
+
+    /// Whether this store has a cache layer installed. Used by the CLI
+    /// to phrase the `hasp cache clear` confirmation message
+    /// accurately (no-cache builds get a "no cache to clear" hint
+    /// instead of a misleading "cleared" line).
+    pub fn has_cache(&self) -> bool {
+        self.cache.is_some()
+    }
+
     /// Fetch a secret by URL.
     ///
     /// If the store was configured with a TTL, the result is memoized and
@@ -391,29 +456,26 @@ impl Store {
             .backends
             .get(scheme)
             .ok_or_else(|| Error::UnknownScheme(scheme.to_owned()))?;
+        let backend_scheme = backend.scheme();
 
-        if let Some(ttl) = self.ttl {
-            if let Ok(cache) = self.cache.read() {
-                if let Some(entry) = cache.get(url) {
-                    if entry.fetched_at.elapsed() <= ttl {
-                        return Ok(entry.secret.clone());
-                    }
-                }
+        if let Some(cache) = &self.cache {
+            let key = Self::cache_key(backend_scheme, url);
+            if let Some(arc) = cache.get(&key) {
+                self.audit(AuditEvent::cache(CacheEvent::Hit, scheme.to_owned()));
+                // Clone the SecretString out of the cache so the
+                // returned value owns its own heap buffer. The Arc
+                // retained by the cache keeps the cached entry alive
+                // until eviction.
+                return Ok((*arc).clone());
             }
+            self.audit(AuditEvent::cache(CacheEvent::Miss, scheme.to_owned()));
         }
 
         let secret = backend.get(parsed_url)?;
 
-        if self.ttl.is_some() {
-            if let Ok(mut cache) = self.cache.write() {
-                cache.insert(
-                    url.to_owned(),
-                    CacheEntry {
-                        secret: secret.clone(),
-                        fetched_at: Instant::now(),
-                    },
-                );
-            }
+        if let Some(cache) = &self.cache {
+            let key = Self::cache_key(backend_scheme, url);
+            cache.insert(key, Arc::new(secret.clone()));
         }
 
         Ok(secret)
@@ -436,17 +498,14 @@ impl Store {
         // same URLs `get`/`put` would; the dry-run path must not lie.
         backend.validate(&parsed_url)?;
 
-        let cached = if let Some(ttl) = self.ttl {
-            if let Ok(cache) = self.cache.read() {
-                cache
-                    .get(url)
-                    .is_some_and(|entry| entry.fetched_at.elapsed() <= ttl)
-            } else {
-                false
-            }
-        } else {
-            false
-        };
+        let cached = self
+            .cache
+            .as_ref()
+            .map(|c| {
+                let key = Self::cache_key(backend.scheme(), url);
+                c.get(&key).is_some()
+            })
+            .unwrap_or(false);
 
         Ok((scheme, backend.scheme(), cached))
     }
@@ -476,10 +535,8 @@ impl Store {
             .ok_or_else(|| Error::UnknownScheme(scheme.to_owned()))?;
         backend.put(parsed_url, value)?;
 
-        if self.ttl.is_some() {
-            if let Ok(mut cache) = self.cache.write() {
-                cache.remove(url);
-            }
+        if let Some(cache) = &self.cache {
+            cache.invalidate(&Self::cache_key(backend.scheme(), url));
         }
 
         Ok(())
@@ -556,10 +613,8 @@ impl Store {
             .ok_or_else(|| Error::UnknownScheme(scheme.to_owned()))?;
         backend.delete(parsed_url)?;
 
-        if self.ttl.is_some() {
-            if let Ok(mut cache) = self.cache.write() {
-                cache.remove(url);
-            }
+        if let Some(cache) = &self.cache {
+            cache.invalidate(&Self::cache_key(backend.scheme(), url));
         }
 
         Ok(())
@@ -598,21 +653,19 @@ impl Store {
 
     fn exists_inner(&self, parsed_url: &Url, url: &str) -> Result<bool, Error> {
         let scheme = parsed_url.scheme();
-
-        if let Some(ttl) = self.ttl {
-            if let Ok(cache) = self.cache.read() {
-                if let Some(entry) = cache.get(url) {
-                    if entry.fetched_at.elapsed() <= ttl {
-                        return Ok(true);
-                    }
-                }
-            }
-        }
-
         let backend = self
             .backends
             .get(scheme)
             .ok_or_else(|| Error::UnknownScheme(scheme.to_owned()))?;
+
+        if let Some(cache) = &self.cache {
+            let key = Self::cache_key(backend.scheme(), url);
+            if cache.get(&key).is_some() {
+                self.audit(AuditEvent::cache(CacheEvent::Hit, scheme.to_owned()));
+                return Ok(true);
+            }
+        }
+
         backend.exists(parsed_url)
     }
 

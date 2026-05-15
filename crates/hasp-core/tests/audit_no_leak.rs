@@ -11,7 +11,7 @@
 //! is opaquely preserved — the sink never reflects anything besides
 //! the explicit field set.
 
-use hasp_core::{AuditEvent, Verb};
+use hasp_core::{AuditEvent, CacheEvent, Verb};
 use proptest::prelude::*;
 
 const SECRET_SENTINEL: &str = "AKIAIOSFODNN7EXAMPLE";
@@ -37,8 +37,16 @@ fn any_verb() -> impl Strategy<Value = Verb> {
         Verb::Delete,
         Verb::Exists,
         Verb::Cp,
-        Verb::Run,
         Verb::Diff,
+    ])
+}
+
+fn any_cache_event() -> impl Strategy<Value = CacheEvent> {
+    prop::sample::select(vec![
+        CacheEvent::Hit,
+        CacheEvent::Miss,
+        CacheEvent::Expire,
+        CacheEvent::Clear,
     ])
 }
 
@@ -84,6 +92,15 @@ proptest! {
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         prop_assert!(parsed.get("event").is_some());
         prop_assert!(parsed.get("src_scheme").is_some());
+    }
+
+    #[test]
+    fn cache_event_never_contains_secret_value(scheme in WIDE_SCHEME, kind in any_cache_event()) {
+        let ev = AuditEvent::cache(kind, scheme);
+        let json = ev.to_json_line();
+        prop_assert!(!json.contains(SECRET_SENTINEL),
+            "cache audit JSON unexpectedly contained sentinel: {json}");
+        let _: serde_json::Value = serde_json::from_str(&json).unwrap();
     }
 }
 

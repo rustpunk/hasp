@@ -9,6 +9,112 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Per-invocation in-process secret cache (`hasp_core::cache`) replacing
+  the previous hand-rolled `Store`-level HashMap cache (#8 Approach E).
+  Built on `moka::sync` with an eviction listener that explicitly drops
+  the `Arc<SecretString>` so the inner heap buffer zeroizes on eviction.
+  Construction requires a `HardeningToken` returned by
+  `hasp_core::install()` — caching cannot be installed without
+  `PR_SET_DUMPABLE=0`, `RLIMIT_CORE=0`, and env-injection refusal
+  having been applied first (a hasp-specific architectural lever no
+  surveyed secrets CLI has). New audit-event classifiers:
+  `cache.hit` / `cache.miss` / `cache.expire` / `cache.clear`, emitted
+  through the existing `AuditSink` plumbing. Closed-shape enum
+  (`CacheEvent`) keeps the no-leak proptest invariant.
+- `--no-cache` CLI flag, `HASP_NO_CACHE=1` env var, and automatic
+  cache-disable when `$CI` is set (Granted-CLI pattern; defends
+  against the warm-cache exfil class demonstrated by the
+  Bitwarden CLI 2026.4.0 compromise and the Mini Shai-Hulud /
+  CanisterWorm worms in May 2026).
+- `Store::clear_cache()` for surgical cache invalidation; emits a
+  single `cache.clear` audit event.
+- `StoreBuilder::with_cache_policy(CachePolicy, HardeningToken)` —
+  the explicit, architecturally correct path for installing caching.
+  `cache_ttl(Option<Duration>)` remains as an ergonomic shorthand
+  that lazily installs hardening via `hasp_core::install()` (silently
+  disables caching on hardening refusal).
+- `hasp_core::install()` returning a `HardeningToken` witness type;
+  re-exported via `hasp::install_hardening`.
+- `hasp cache clear` CLI subcommand. Drops every in-process cache
+  entry (and, when the `cache-persistent` Cargo feature ships its
+  implementation, will also remove the on-disk encrypted cache file
+  and its OS-keyring-bound key).
+- `cache-persistent` Cargo feature scaffold on `hasp-core` (#8
+  Approach A). Compiles the `CachePolicy::Persistent(PersistentPolicy)`
+  variant so binary builders can wire `HASP_CACHE_TTL` and the
+  `hasp cache clear` subcommand today; the encrypted-file
+  implementation (XChaCha20-Poly1305 + OS-keyring key + UUID-tuple
+  cache keys for `op://`) lands in a follow-up so `hasp-core` stays
+  free of platform-specific keyring dependencies for now. Today,
+  constructing a `Persistent` policy falls back to the in-process
+  policy with the persistent TTL/capacity.
+- `HASP_CACHE_TTL=<seconds>` env var. Overrides the default cache
+  TTL (1..=3600). Values above 3600 clamp to AWS Agent's published
+  1-hour ceiling; `0` disables the cache entirely.
+- `op://` backend `put` / `delete` / `list` (#7). `put` issues
+  `op item edit <item> --vault <vault> <field>=<value>`; on NotFound
+  it falls back to `op item create --category password`. `delete`
+  issues `op item delete <item> --vault <vault>` (removes the entire
+  item; the URL's `field` segment is ignored on delete). `list`
+  operates on the vault-only URL shape `op://<vault>` and parses
+  `op item list --vault <vault> --format=json`; emitted `Entry`
+  URLs prefer the JSON `id` (UUID, rename-stable) over the title.
+  All three honor the existing ambient-credential check and
+  subprocess timeout. Argv exposure (`/proc/<pid>/cmdline` is
+  same-uid readable on Linux) is the documented residual surface
+  for `put` since `op` exposes no stdin variant for field values;
+  the same constraint applies to every op-based tool. Symmetric
+  `bw://` write path is filed as a follow-up.
+
+### Changed
+
+- Default CLI behavior now memoizes fetched secrets for the lifetime
+  of one invocation (5-minute TTL, 1024-entry capacity ceiling).
+  This eliminates the duplicate-URL footgun across batched fetches
+  (`hasp get URL URL URL` triggers one backend call). Opt out per
+  invocation with `--no-cache`, per environment with
+  `HASP_NO_CACHE=1`, or run in CI (auto-disabled).
+- `Verb::Run` removed from the library-side `hasp_core::audit::Verb`
+  enum. `run` is a CLI-only concern (subprocess env injection) and
+  does not belong on the library trait surface. CLI emission of
+  `run.start` / `run.done` events now goes through the new
+  `AuditEvent::with_event(event: &'static str, …)` constructor,
+  which preserves the closed-set / no-leak invariant via the static
+  string bound. **Soft breaking change** for any downstream that
+  pattern-matched on `Verb::Run`.
+- `HASP_REQUIRE_PROFILE_ALLOW` default is now **on**.
+  Previously opt-in (`=1` enabled), now opt-out (`=0` / `false` /
+  `no` / `off` disables; `--no-profile-allow` flag continues to
+  bypass per-invocation). Refusal exit code is now 6 (precondition),
+  matching the verb-error mapping conventions. **Soft breaking
+  change**: existing users with a `profiles.toml` must run
+  `hasp profile allow` once on upgrade, or set
+  `HASP_REQUIRE_PROFILE_ALLOW=0` to opt out.
+- `Verb` audit-event domain is unchanged otherwise. Cache events use
+  a separate closed-shape `CacheEvent` classifier (`hit` / `miss` /
+  `expire` / `clear`).
+
+### Dependencies
+
+- `moka = "0.12"` (sync feature only). Active (2.5k stars, 1525
+  commits, release 2026-03-22, MIT/Apache-2.0, used by crates.io).
+  Required for the synchronous eviction listener that lets the cache
+  zeroize evicted `Arc<SecretString>` entries on Drop.
+- `dirs = "6"` on `hasp-core` (optional, behind `cache-persistent`).
+  Resolves the default persistent-cache file path. Already a
+  workspace dep elsewhere.
+- `serde_json` on `hasp-backend-op` (workspace dep). Used to parse
+  `op item list --format=json`.
+
+### Follow-up issues filed for next sprint
+
+- #22 — op:// cross-invocation persistent cache (Approach A
+  implementation: encrypted file + OS-keyring-bound key +
+  UUID-tuple cache keys).
+- #23 — bw:// write path (symmetric to #7).
+- #24 — Heap-residue mitigation via sized-read backend API.
+- #25 — PTY masking for `hasp run` (deferred from #2 MVP).
+
 - `hasp diff <a> <b>` and `Store::compare(a, b) -> DiffOutcome` for
   cross-backend drift detection (#1). Read-only sibling of `cp`: fetches
   both secrets, compares in constant time via `subtle::ConstantTimeEq`,

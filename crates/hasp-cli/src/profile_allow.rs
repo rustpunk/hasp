@@ -6,7 +6,10 @@
 //! current mtime and SHA-256 so that any subsequent modification is
 //! detected before the profile is used.
 //!
-//! Enforcement is opt-in: set `HASP_REQUIRE_PROFILE_ALLOW=1` to enable.
+//! Enforcement is on by default. Opt out per environment with
+//! `HASP_REQUIRE_PROFILE_ALLOW=0` (also accepts `false` / `no` /
+//! `off`); per-invocation bypass via `--no-profile-allow`. Refusal
+//! exit code is 6 (precondition).
 //!
 //! ## Allow-state file format
 //!

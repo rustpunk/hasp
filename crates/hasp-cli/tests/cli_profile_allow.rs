@@ -112,6 +112,89 @@ fn profile_show_reports_allowed_after_allow() {
 }
 
 #[test]
+fn require_profile_allow_dual_opt_out_is_a_noop() {
+    // Setting both `HASP_REQUIRE_PROFILE_ALLOW=0` and `--no-profile-allow`
+    // is redundant but not an error — the env-var check shorts the
+    // enforcement guard before `--no-profile-allow` is consulted.
+    let _l = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = tempfile::tempdir().unwrap();
+    let profiles = dir.path().join("profiles.toml");
+    let secret = dir.path().join("s.txt");
+    write(&secret, "v");
+    write(&profiles, &minimal_profiles_toml(&file_url(&secret)));
+
+    let output = hasp()
+        .env("HASP_PROFILES_PATH", profiles.to_str().unwrap())
+        .env("HASP_REQUIRE_PROFILE_ALLOW", "0")
+        .args(["--no-profile-allow", "get", &file_url(&secret)])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "dual opt-out must succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn require_profile_allow_default_on_refuses_unallowed_profiles_toml() {
+    // Default-on smoke test. With no `HASP_REQUIRE_PROFILE_ALLOW`
+    // override and an unallowed `profiles.toml`, `hasp get @alias` is
+    // refused with the precondition exit code (6).
+    let _l = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = tempfile::tempdir().unwrap();
+    let profiles = dir.path().join("profiles.toml");
+    let secret = dir.path().join("s.txt");
+    write(&secret, "v");
+    write(&profiles, &minimal_profiles_toml(&file_url(&secret)));
+
+    let output = hasp()
+        .env("HASP_PROFILES_PATH", profiles.to_str().unwrap())
+        // No HASP_REQUIRE_PROFILE_ALLOW set; default is on.
+        .args(["get", &file_url(&secret)])
+        .output()
+        .unwrap();
+    assert!(
+        !output.status.success(),
+        "default-on enforcement must refuse unallowed profiles.toml"
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(6),
+        "expected exit code 6 (PRECONDITION), got {:?}",
+        output.status.code()
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("allow") || stderr.contains("trusted"),
+        "error message must mention allow: {stderr}"
+    );
+}
+
+#[test]
+fn require_profile_allow_opt_out_with_falsy_value() {
+    // `HASP_REQUIRE_PROFILE_ALLOW=0` is the opt-out under default-on.
+    let _l = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = tempfile::tempdir().unwrap();
+    let profiles = dir.path().join("profiles.toml");
+    let secret = dir.path().join("s.txt");
+    write(&secret, "v");
+    write(&profiles, &minimal_profiles_toml(&file_url(&secret)));
+
+    let output = hasp()
+        .env("HASP_PROFILES_PATH", profiles.to_str().unwrap())
+        .env("HASP_REQUIRE_PROFILE_ALLOW", "0")
+        .args(["get", &file_url(&secret)])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "HASP_REQUIRE_PROFILE_ALLOW=0 must opt out: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn require_profile_allow_enforces_on_get_when_not_allowed() {
     let _l = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let dir = tempfile::tempdir().unwrap();

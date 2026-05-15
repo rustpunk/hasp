@@ -330,6 +330,121 @@ hasp man > /usr/share/man/man1/hasp.1
 | `-h, --help` | Print help. Pass `-h` for a summary, `--help` for full help. |
 | `-q, --quiet` | Suppress non-error informational output. |
 | `-v, --verbose` | Increase output verbosity; prints operation traces to stderr. Can be used multiple times (`-vv`). |
+| `--no-cache` | Disable the per-invocation in-process secret cache for this invocation. |
+| `--no-profile-allow` | Skip the profile-allow enforcement for this invocation (per-invocation opt-out of the default-on `HASP_REQUIRE_PROFILE_ALLOW` enforcement). |
+
+## Profile-allow enforcement
+
+Profile-allow is **on by default**. Before `hasp` will use profile
+aliases (`@profile/key`), the operator must run `hasp profile allow`
+to record `profiles.toml` as trusted (mtime + SHA-256 baseline,
+direnv-style).
+
+Opt out per environment with `HASP_REQUIRE_PROFILE_ALLOW=0` (also
+accepts `false`, `no`, `off`). Per-invocation bypass via
+`--no-profile-allow`.
+
+Refusal exit code is `6` (precondition) — matches the verb-error
+mapping convention; scripted callers can distinguish "no trusted
+profiles.toml" from usage errors (`1`).
+
+## Caching
+
+`hasp` memoizes fetched secrets for the lifetime of a single invocation
+(5-minute TTL, 1024-entry capacity ceiling). This eliminates the
+duplicate-URL footgun when a script issues several `hasp get` calls for
+the same URL in one invocation or uses `Store::batch_get`.
+
+The cache lives only in process memory. There is no on-disk
+persistence, no daemon, no IPC. Cache lifetime ≤ process lifetime by
+construction. Cached entries hold `Arc<SecretString>` references whose
+inner heap buffer zeroizes on eviction.
+
+### Disabling the cache
+
+The cache is disabled when **any** of the following is true:
+
+1. `--no-cache` is passed on the command line.
+2. `HASP_NO_CACHE=1` is set in the environment (also accepts `true`,
+   `yes`, `on`).
+3. The `CI` environment variable is set. CI runners are the documented
+   target of credential-cache-targeting supply-chain worms (Bitwarden
+   CLI 2026.4.0 compromise; Mini Shai-Hulud / CanisterWorm worms in
+   May 2026). Auto-disabling defends against the warm-cache exfil
+   class without forcing every CI pipeline to remember the flag.
+
+### Configuring the TTL envelope
+
+`HASP_CACHE_TTL=<seconds>` overrides the default cache TTL. Valid
+range: `1..=3600`. Values above 3600 are clamped to AWS Secrets
+Manager Agent's published 1-hour ceiling. `HASP_CACHE_TTL=0` disables
+the cache entirely (equivalent to `--no-cache`).
+
+### Clearing the cache
+
+```
+hasp cache clear
+```
+
+Drops every cached entry within the current invocation. (The in-process
+cache lives only for the current process, so the gesture is primarily
+useful as a no-op exit; once the `cache-persistent` on-disk variant
+ships, the same command will also remove the encrypted cache file and
+the OS-keyring entry holding its symmetric key.)
+
+### Persistent cache (`cache-persistent` Cargo feature, not yet implemented)
+
+The `cache-persistent` Cargo feature is the opt-in cross-invocation
+encrypted-file cache, currently scaffolded only. When the
+implementation lands, the file will be at
+`$XDG_CACHE_HOME/hasp/cache.bin` (mode `0o600`), encrypted with
+XChaCha20-Poly1305 using a per-host symmetric key bound to the OS
+keyring (Secret Service / Keychain / Credential Manager).
+
+The verbatim threat-model warning from the AWS Secrets Manager Agent
+applies and is reproduced here to set expectations:
+
+> *After the secret value is pulled into the cache, any user with
+> access to the compute environment can access the secret from the
+> cache.*
+
+The feature is off by default for a reason: any persistent cache file
+inherits the threat surface that infostealers and supply-chain worms
+target by name (Bitwarden CLI 2026.4.0; Mini Shai-Hulud /
+CanisterWorm, May 2026). Enable only after considering the deployment
+threat model.
+
+### Cache audit events
+
+Each cache decision emits a structured one-line JSON event via the
+configured `AuditSink`:
+
+```json
+{"event":"cache.miss","ts":1747000000,"src_scheme":"vault","outcome":"miss"}
+{"event":"cache.hit","ts":1747000001,"src_scheme":"vault","outcome":"hit"}
+{"event":"cache.expire","ts":1747000300,"src_scheme":"vault","outcome":"expire"}
+{"event":"cache.clear","ts":1747000400,"src_scheme":"all","outcome":"clear"}
+```
+
+The closed-shape `CacheEvent` enum prevents value bytes from ever
+landing in the audit stream; the proptest in
+`crates/hasp-core/tests/audit_no_leak.rs` enforces this.
+
+### Threat model
+
+The cache only protects against re-fetching from the backend. It does
+**not** protect against:
+
+- `/proc/<pid>/mem` inspection by a same-uid attacker
+  (`PR_SET_DUMPABLE=0` mitigates this; the hardening token witnesses
+   that the mitigation has been applied before any cache is
+   constructed).
+- A coredump triggered after a cache hit (mitigated by
+  `RLIMIT_CORE=0`, also required by the hardening token).
+- A debugger attached by the same user before cache construction.
+
+For cross-invocation persistence (the encrypted-file-on-disk variant),
+see the `cache-persistent` Cargo feature in the next sprint slot.
 
 ## Audit events
 

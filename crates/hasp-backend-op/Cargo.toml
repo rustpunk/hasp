@@ -11,6 +11,7 @@ description = "op:// backend for hasp — 1Password CLI subprocess wrapper."
 hasp-core = { path = "../hasp-core" }
 url = "2.5"
 secrecy = "0.10"
+serde_json = { workspace = true }
 
 [dev-dependencies]
 hasp-core = { path = "../hasp-core", features = ["test-utils"] }

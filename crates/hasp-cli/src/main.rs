@@ -44,6 +44,17 @@ struct Cli {
     /// `hasp profile allow` before each command.
     #[arg(long, global = true)]
     no_profile_allow: bool,
+
+    /// Disable the per-invocation in-process secret cache.
+    ///
+    /// By default `hasp` memoizes fetched secrets for the lifetime of
+    /// a single invocation (process lifetime), which eliminates the
+    /// duplicate-URL footgun across batched fetches. Also honored:
+    /// `HASP_NO_CACHE=1` env var, or presence of `CI` (auto-disabled
+    /// in CI environments to defend against credential-cache-targeting
+    /// supply-chain worms — see cli-reference.md#caching).
+    #[arg(long, global = true)]
+    no_cache: bool,
 }
 
 #[derive(Subcommand)]
@@ -174,6 +185,11 @@ enum Command {
         #[command(subcommand)]
         action: ProfileAction,
     },
+    /// Manage the in-process and (when enabled) on-disk secret cache.
+    Cache {
+        #[command(subcommand)]
+        action: CacheAction,
+    },
     /// Generate a man page for the `hasp` binary.
     ///
     /// Hidden from help to keep the CLI surface minimal.
@@ -188,6 +204,20 @@ enum Command {
         /// Target shell.
         shell: clap_complete::aot::Shell,
     },
+}
+
+/// Sub-actions for `hasp cache`.
+#[derive(Subcommand)]
+enum CacheAction {
+    /// Drop every cached entry.
+    ///
+    /// Today the cache is in-process: clearing it has effect only
+    /// within the current invocation (which exits right after this
+    /// command, so the gesture is a no-op against future invocations).
+    /// When the `cache-persistent` feature is enabled and the
+    /// on-disk cache implementation lands, this also removes the
+    /// encrypted cache file and the OS-keyring entry holding its key.
+    Clear,
 }
 
 /// Sub-actions for `hasp profile`.
@@ -231,16 +261,20 @@ fn main() {
     // on injection-style env vars (LD_PRELOAD, DYLD_INSERT_LIBRARIES,
     // …) and setuid configurations; applies best-effort platform
     // mitigations (PR_SET_DUMPABLE, WER suppression, mitigation
-    // policies, dll search-order). Outcomes are silently discarded
-    // here — a future `--verbose-hardening` flag could surface them.
-    if let Err(e) = hasp::harden_process() {
-        eprintln!("hasp: {e}");
-        std::process::exit(EXIT_USAGE);
-    }
+    // policies, dll search-order). The returned token is the witness
+    // that hardening succeeded; it's required to construct the
+    // in-process cache later in `run`.
+    let token = match hasp::install_hardening() {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("hasp: {e}");
+            std::process::exit(EXIT_USAGE);
+        }
+    };
 
     let cli = Cli::parse();
 
-    if let Err((code, msg)) = run(cli) {
+    if let Err((code, msg)) = run(cli, token) {
         eprintln!("{msg}");
         std::process::exit(code);
     }
@@ -263,7 +297,7 @@ pub(crate) const EXIT_PRECONDITION: i32 = 6;
 // returning something unexpected.
 pub(crate) const EXIT_BACKEND: i32 = 7;
 
-fn run(cli: Cli) -> Result<(), (i32, String)> {
+fn run(cli: Cli, hardening_token: hasp::HardeningToken) -> Result<(), (i32, String)> {
     // Init and Profile don't need a store; Profile::Allow also doesn't
     // need profiles loaded (it writes the allow record, it doesn't read
     // aliases).
@@ -274,26 +308,37 @@ fn run(cli: Cli) -> Result<(), (i32, String)> {
     let profiles = profiles::load_profiles()
         .map_err(|e| usage_err(format!("failed to load profiles: {e}")))?;
 
-    // Profile allow-list enforcement. Active when
-    // `HASP_REQUIRE_PROFILE_ALLOW` is set to a truthy value (`1` or
-    // `true`) AND `--no-profile-allow` is not given. Refuse unless the
+    // Profile allow-list enforcement. ON by default; opt out via
+    // `HASP_REQUIRE_PROFILE_ALLOW=0` (or `false`/`no`/`off`) or
+    // `--no-profile-allow` for per-invocation bypass. Refuse unless the
     // current `profiles.toml` has been explicitly marked trusted via
-    // `hasp profile allow`. Truthy-only semantics match the
-    // documented `=1` contract; `=0`, empty, or unset all disable.
-    if is_truthy_env("HASP_REQUIRE_PROFILE_ALLOW")
-        && !matches!(&cli.command, Command::Profile { .. })
+    // `hasp profile allow`.
+    //
+    // The default-on flip is a soft breaking change from prior releases
+    // where enforcement was opt-in. Documented in `CHANGELOG.md` and
+    // `docs/src/cli-reference.md`; on first invocation under the new
+    // default that finds an unallowed `profiles.toml`, the resulting
+    // `PreconditionFailed` error message points the user at
+    // `hasp profile allow`.
+    if !is_falsy_env("HASP_REQUIRE_PROFILE_ALLOW")
+        && !matches!(
+            &cli.command,
+            Command::Profile { .. } | Command::Cache { .. }
+        )
     {
         if let Some(profiles_path) = profile_allow::profiles_toml_path() {
             profile_allow::check_profile_allowed(&profiles_path, cli.no_profile_allow)
-                .map_err(|e| usage_err(e.to_string()))?;
+                .map_err(|e| precondition_err(e.to_string()))?;
         }
     }
 
     let proxy = resolve_proxy(&cli, &profiles)?;
     let audit_sink = resolve_audit_sink();
+    let cache_policy = resolve_cache_policy(&cli);
     let store = hasp::StoreBuilder::with_defaults()
         .proxy(proxy)
         .with_audit_sink(audit_sink.clone())
+        .with_cache_policy(cache_policy, hardening_token)
         .build();
 
     // `cp` and `diff` handle `--explain` in their own arms because
@@ -529,6 +574,19 @@ fn run(cli: Cli) -> Result<(), (i32, String)> {
         Command::Init { force } => {
             config_init::init(force).map_err(usage_err)?;
         }
+        Command::Cache { action } => match action {
+            CacheAction::Clear => {
+                let had_cache = store.has_cache();
+                store.clear_cache();
+                if !cli.quiet {
+                    if had_cache {
+                        eprintln!("hasp cache cleared.");
+                    } else {
+                        eprintln!("hasp: no cache to clear (disabled by --no-cache, HASP_NO_CACHE, or CI auto-disable).");
+                    }
+                }
+            }
+        },
         Command::Complete { shell } => {
             let mut app = Cli::command();
             let bin_name = app.get_name().to_string();
@@ -628,6 +686,7 @@ fn command_address(cli: &Cli) -> Option<&str> {
         | Command::Run { .. }
         | Command::Init { .. }
         | Command::Profile { .. }
+        | Command::Cache { .. }
         | Command::Man
         | Command::Complete { .. } => None,
     }
@@ -646,6 +705,7 @@ fn command_verb(cli: &Cli) -> &'static str {
         Command::Run { .. } => "run",
         Command::Init { .. } => "init",
         Command::Profile { .. } => "profile",
+        Command::Cache { .. } => "cache",
         Command::Man => "man",
         Command::Complete { .. } => "complete",
     }
@@ -668,6 +728,7 @@ fn command_addresses(cli: &Cli) -> Vec<&str> {
             .collect(),
         Command::Init { .. }
         | Command::Profile { .. }
+        | Command::Cache { .. }
         | Command::Man
         | Command::Complete { .. } => {
             vec![]
@@ -701,6 +762,58 @@ fn is_truthy_env(name: &str) -> bool {
             "1" | "true" | "yes" | "on"
         ),
         Err(_) => false,
+    }
+}
+
+/// Falsy-only env-var check. Used for opt-out flags whose default is
+/// "on" (e.g., `HASP_REQUIRE_PROFILE_ALLOW=0` disables enforcement
+/// that is otherwise on by default).
+fn is_falsy_env(name: &str) -> bool {
+    match std::env::var(name) {
+        Ok(v) => matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "0" | "false" | "no" | "off"
+        ),
+        Err(_) => false,
+    }
+}
+
+/// Resolve the cache policy for this invocation.
+///
+/// Default is the per-invocation in-process cache
+/// (`CachePolicy::process_default`, 5-minute TTL). Disabled by:
+///
+/// 1. `--no-cache` flag (explicit user opt-out).
+/// 2. `HASP_NO_CACHE=1` truthy env var (per-environment opt-out).
+/// 3. `HASP_CACHE_TTL=0` env var. AWS Secrets Manager Agent's
+///    `TTL=0 disables` convention.
+/// 4. Presence of `CI` env var. CI environments are the documented
+///    target surface for credential-cache-targeting supply-chain
+///    worms (Bitwarden 2026.4.0 / Mini Shai-Hulud / CanisterWorm);
+///    auto-disabling there defends against the warm-cache class of
+///    exfil without forcing every CI pipeline to remember the flag.
+///
+/// `HASP_CACHE_TTL=<seconds>` (1..=3600) overrides the default TTL
+/// envelope. Above 3600 the value is clamped to 3600 (AWS Agent's
+/// published 1-hour ceiling). Below 1 is treated as disabled.
+fn resolve_cache_policy(cli: &Cli) -> hasp::CachePolicy {
+    if cli.no_cache || is_truthy_env("HASP_NO_CACHE") || std::env::var_os("CI").is_some() {
+        return hasp::CachePolicy::Disabled;
+    }
+
+    match std::env::var("HASP_CACHE_TTL")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+    {
+        Some(0) => hasp::CachePolicy::Disabled,
+        Some(secs) => {
+            let clamped = secs.min(3600);
+            hasp::CachePolicy::Process {
+                ttl: std::time::Duration::from_secs(clamped),
+                capacity: 1024,
+            }
+        }
+        None => hasp::CachePolicy::process_default(),
     }
 }
 

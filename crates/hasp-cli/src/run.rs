@@ -15,7 +15,7 @@ use crate::profiles::Profiles;
 use crate::{
     cli_error, precondition_err, resolve, scheme_of, usage_err, EXIT_BACKEND, EXIT_SUCCESS,
 };
-use hasp::{AuditEvent, AuditSink, Verb};
+use hasp::{AuditEvent, AuditSink};
 use secrecy::ExposeSecret;
 use std::collections::{BTreeSet, HashMap};
 use std::io::IsTerminal;
@@ -116,7 +116,11 @@ pub fn run(
         _ => "multi".to_owned(),
     };
 
-    audit_sink.emit(&AuditEvent::start(Verb::Run, umbrella.clone()));
+    audit_sink.emit(&AuditEvent::with_event(
+        "run.start",
+        umbrella.clone(),
+        "started",
+    ));
 
     // Resolve every URL up front. If any fetch fails, the child is
     // never spawned — hasp run is all-or-nothing. The per-URL
@@ -129,7 +133,8 @@ pub fn run(
             Err(e) => {
                 let kind = e.kind();
                 audit_sink.emit(
-                    &AuditEvent::done(Verb::Run, umbrella.clone(), "error").with_error_kind(kind),
+                    &AuditEvent::with_event("run.done", umbrella.clone(), "error")
+                        .with_error_kind(kind),
                 );
                 return Err(cli_error(e));
             }
@@ -162,7 +167,8 @@ pub fn run(
         Ok(s) => s,
         Err(e) => {
             audit_sink.emit(
-                &AuditEvent::done(Verb::Run, umbrella.clone(), "error").with_error_kind("backend"),
+                &AuditEvent::with_event("run.done", umbrella.clone(), "error")
+                    .with_error_kind("backend"),
             );
             return Err((EXIT_BACKEND, format!("failed to exec '{program}': {e}")));
         }
@@ -189,7 +195,7 @@ pub fn run(
     };
 
     let outcome = if code == 0 { "ok" } else { "child_nonzero" };
-    audit_sink.emit(&AuditEvent::done(Verb::Run, umbrella, outcome));
+    audit_sink.emit(&AuditEvent::with_event("run.done", umbrella, outcome));
 
     Ok(code)
 }
