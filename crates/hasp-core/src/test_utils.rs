@@ -126,12 +126,30 @@ if [ "$1" = "item" ] && [ "$2" = "list" ]; then
     fi
 fi
 
-if [ "$1" = "item" ] && [ "$2" = "edit" ]; then
+if [ "$1" = "item" ] && [ "$2" = "get" ]; then
     item="$3"
-    # $4 is --vault, $5 is vault name, $6+ are field=value assignments.
     vault="$5"
     if [ "$vault" = "test-vault" ] && [ "$item" = "test-item" ]; then
-        # Edit succeeds for any field assignment on existing items.
+        printf '%s' '{"id":"uuid-test-item","title":"test-item","category":"PASSWORD","vault":{"id":"v","name":"test-vault"},"fields":[{"id":"password","label":"password","type":"CONCEALED","purpose":"PASSWORD","value":"old-password"},{"id":"field1","label":"field1","type":"CONCEALED","purpose":"","value":"old-field1"}]}'
+        exit 0
+    fi
+    echo "could not find item" >&2
+    exit 1
+fi
+
+if [ "$1" = "item" ] && [ "$2" = "edit" ]; then
+    item="$3"
+    # `op item edit <item> --vault <vault> -`. The final `-` reads the
+    # JSON template from stdin. Anything else on argv after the vault
+    # would be a regression to the old field=value assignment path.
+    if [ "$6" != "-" ]; then
+        echo "fake op: edit must use stdin variant ('-' final positional, got $6)" >&2
+        exit 1
+    fi
+    # Drain stdin so the parent doesn't block on EPIPE.
+    cat >/dev/null
+    vault="$5"
+    if [ "$vault" = "test-vault" ] && [ "$item" = "test-item" ]; then
         exit 0
     fi
     echo "could not find item" >&2
@@ -139,8 +157,18 @@ if [ "$1" = "item" ] && [ "$2" = "edit" ]; then
 fi
 
 if [ "$1" = "item" ] && [ "$2" = "create" ]; then
-    # `op item create --vault <vault> --title <item> --category password <field>=<value>`
-    # We don't validate the full arg shape — just succeed for known vaults.
+    # `op item create --vault <vault> --title <item> --category password -`.
+    # The final positional must be `-`. Drain stdin and succeed for
+    # known vaults. POSIX sh has no `${!#}`; iterate to the last arg.
+    last=""
+    for a in "$@"; do
+        last="$a"
+    done
+    if [ "$last" != "-" ]; then
+        echo "fake op: create must use stdin variant ('-' final positional, got $last)" >&2
+        exit 1
+    fi
+    cat >/dev/null
     for arg in "$@"; do
         case "$arg" in
             test-vault) exit 0 ;;

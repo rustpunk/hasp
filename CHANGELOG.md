@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- `op://` `put` no longer carries the secret value on `op`'s argv (#27).
+  The implementation now fetches the existing item via
+  `op item get --format=json`, splices the new value into the matching
+  field's `value`, and pipes the JSON template through stdin to
+  `op item edit <item> --vault <vault> -`. The `create` branch
+  (NotFound fallback) builds a minimum-viable `PASSWORD`-category
+  template in-process and pipes to `op item create … -`. On Linux this
+  shrinks the exposure window from "full subprocess lifetime
+  (`/proc/<pid>/cmdline` is same-uid readable)" to "pipe consumption
+  interval (`/proc/<pid>/fd/0` is gated by `PTRACE_MODE_READ_FSCREDS`
+  and `yama.ptrace_scope`)" — the path 1Password's own docs recommend.
+  Stdin support was added to `bw://` `put` from the start in #23, so
+  `op://` is the only backend that changed posture. The `FakeOpGuard`
+  test scaffold rejects the legacy argv shape — regressions surface
+  immediately. README's "Argv exposure on `put`" section rewritten.
+
 ### Added
 
 - `bw://` backend `put` / `delete` / `list` (#23). `put` does a
