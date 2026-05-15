@@ -10,10 +10,20 @@
 use hasp::{Error, Store};
 use proptest::prelude::*;
 
+/// Closed set of feature-gated scheme strings the workspace might
+/// register. Any generator output that matches one of these is
+/// `prop_assume!`-skipped — for a registered scheme, the answer is
+/// "backend-specific URL parse error" or "backend init error", not
+/// the `UnknownScheme` invariant under test here.
+const REGISTERED_SCHEMES: &[&str] = &[
+    "env", "file", "keyring", "op", "vault", "bw", "aws-sm", "aws-ssm", "gcp-sm", "azure-kv",
+];
+
 // Any URL with an unknown scheme must yield Error::UnknownScheme.
 proptest! {
     #[test]
     fn unknown_scheme_always_unknown(scheme in "[a-z]+", rest in "[A-Za-z0-9/._-]+") {
+        prop_assume!(!REGISTERED_SCHEMES.contains(&scheme.as_str()));
         let store = Store::with_defaults();
         let url = format!("{}://{}", scheme, rest);
         let result = store.get(&url);

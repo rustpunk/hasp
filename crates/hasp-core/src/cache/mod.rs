@@ -42,7 +42,7 @@ use crate::SecretString;
 #[cfg(feature = "cache-persistent")]
 pub mod persistent;
 #[cfg(feature = "cache-persistent")]
-pub use persistent::{DecryptedEntry, PersistentStore};
+pub use persistent::{DecryptedEntry, LoadOutcome, PersistentStore};
 
 /// Cache key. `scheme` is the URL scheme and is intentionally
 /// scheme-namespaced so the same URL string handled by two different
@@ -62,19 +62,19 @@ impl CacheKey {
     }
 }
 
-/// Per-invocation in-process cache policy.
+/// Cache policy selector for [`ProcessCache::new`].
 ///
 /// `Disabled` is the safe default and skips every cache code path.
 /// `Process` enables in-process memoization with the given TTL and
 /// capacity ceiling; capacity-eviction is LRU within moka's segmented
 /// design.
 ///
-/// `Persistent` (gated on the `cache-persistent` Cargo feature) is
-/// reserved for a future cross-invocation encrypted-file path.
-/// Constructing it via [`ProcessCache::new`] currently downgrades to
-/// the in-process `Process` policy with the persistent's TTL and
-/// capacity — the on-disk encrypted-file implementation is not yet
-/// in tree.
+/// `Persistent` (gated on the `cache-persistent` Cargo feature) wires
+/// an encrypted on-disk envelope keyed by an OS-keyring-bound 32-byte
+/// symmetric key. Load happens on construction; save on
+/// [`crate::cache::ProcessCache::save_to_disk`]. Threat model and
+/// fail-closed contract live on [`PersistentPolicy`] and
+/// [`persistent::PersistentStore`].
 #[derive(Debug, Clone, Default)]
 pub enum CachePolicy {
     #[default]
@@ -87,26 +87,32 @@ pub enum CachePolicy {
     Persistent(PersistentPolicy),
 }
 
-/// Persistent cache configuration (scaffold only).
+/// Configuration for the encrypted on-disk cache.
 ///
 /// `ttl` is the per-entry time-to-live, clamped against AWS Secrets
-/// Manager Agent's published envelope (300s default, 3600s max, 0
-/// disables persistence).
+/// Manager Agent's published envelope (300s default, 3600s max). A
+/// `ttl` of zero disables persistence at the policy layer; the
+/// caller should select `CachePolicy::Disabled` instead.
 ///
-/// `path` is the intended encrypted cache file location. Default:
-/// `$XDG_CACHE_HOME/hasp/cache.bin`. File mode `0o600` on Unix when
-/// the implementation lands.
+/// `path` is the encrypted cache file location. Default:
+/// `$XDG_CACHE_HOME/hasp/cache.bin`, mode `0o600` on Unix, atomically
+/// replaced on save via tempfile + rename.
 ///
 /// `keyring_service` and `keyring_account` identify the OS-keyring
-/// entry holding the per-host symmetric key (XChaCha20-Poly1305).
-/// Default service is `"hasp"`; default account is
-/// `"cache:{user}@{hostname}"`.
+/// entry holding the per-host XChaCha20-Poly1305 symmetric key.
+/// Default service is `"hasp"`; default account is `"cache:<user>"`.
+/// The first `keyring_core::Entry::get_secret()` doubles as the
+/// headless-container probe — when the keyring is unreachable,
+/// `ProcessCache::new` surfaces `Error::PermissionDenied`, no
+/// co-located-key fallback (RustCrypto AEADs + RFC 8439 / XChaCha20
+/// extension).
 ///
-/// The struct currently pins the design in code; constructing it and
-/// passing to [`ProcessCache::new`] is safe but downgrades to the
-/// in-process `Process` policy with the persistent's TTL and
-/// capacity. The on-disk encrypted-file implementation is not yet
-/// in tree.
+/// AWS Secrets Manager Agent's threat-model warning applies verbatim:
+/// *"After the secret value is pulled into the cache, any user with
+/// access to the compute environment can access the secret from the
+/// cache."* The OS-keyring binding defends against trivial filesystem
+/// grep and backup-snapshot exfil — not against same-uid code
+/// execution.
 #[cfg(feature = "cache-persistent")]
 #[derive(Debug, Clone)]
 pub struct PersistentPolicy {
@@ -272,33 +278,36 @@ impl ProcessCache {
             p.keyring_account.clone(),
         ));
         let cache = Self::build_process(p.ttl, p.capacity, audit_sink.clone(), Some(store.clone()));
-        let loaded = match store.load() {
-            Ok(entries) => entries,
+        let outcome = match store.load() {
+            Ok(o) => o,
             Err(e) if matches!(e, Error::PermissionDenied(_)) => {
                 // Fail-closed: cannot reach the OS keyring.
                 return Err(e);
             }
-            Err(e) => {
-                // I/O or serialization failure — surface as cold cache
-                // plus a tamper-rejection audit event. Do not return
-                // Err: the user's flow continues with a fresh cache.
-                if let Some(sink) = &audit_sink {
-                    sink.emit(&AuditEvent::cache(CacheEvent::TamperRejected, "all"));
+            Err(_e) => {
+                // I/O failure on the cache file itself (read error after
+                // it existed and was readable enough to be opened, then
+                // something went sideways). Treat as a cold cache so the
+                // user's flow continues, but DO NOT emit
+                // `cache.tamper_rejected` — that label is reserved for
+                // AEAD-tag mismatches surfaced through the LoadOutcome
+                // path, where the threat-model signal is "hostile
+                // bit-flip" rather than "transient I/O".
+                persistent::LoadOutcome {
+                    entries: Vec::new(),
+                    tampered: false,
                 }
-                let _ = e;
-                Vec::new()
             }
         };
-        let mut count = 0u64;
-        for e in loaded {
+        if outcome.tampered {
+            if let Some(sink) = &audit_sink {
+                sink.emit(&AuditEvent::cache(CacheEvent::TamperRejected, "all"));
+            }
+        }
+        for e in outcome.entries {
             cache.inner.insert(e.key, e.value);
-            count += 1;
         }
         if let Some(sink) = &audit_sink {
-            // One load event covers the batch; the count is in the
-            // event for the operator-facing line but not required by
-            // the closed-shape invariant (event label is static).
-            let _ = count;
             sink.emit(&AuditEvent::cache(CacheEvent::Load, "all"));
         }
         Ok(Some(cache))
@@ -342,15 +351,18 @@ impl ProcessCache {
 
     /// Persist the cache snapshot to disk. No-op when the cache was
     /// constructed without a `Persistent` policy. Emits `cache.save`
-    /// on success; errors surface to the caller (and `Store::audit`
-    /// upstream).
+    /// on success; errors surface to the caller.
     ///
-    /// Each saved entry's `expires_at` is recomputed as
-    /// `SystemTime::now() + self.ttl` — moka does not expose
-    /// per-entry insertion timestamps, so the freshness is an
-    /// over-estimate bounded by the configured TTL. In practice this
-    /// is a sub-second drift because save runs on the CLI's exit
-    /// path; a tighter bound is tracked under a follow-up.
+    /// **TTL drift caveat.** Each saved entry's `expires_at` is
+    /// recomputed as `SystemTime::now() + self.ttl` because moka does
+    /// not expose per-entry insertion timestamps. For a CLI (one save
+    /// per process, sub-second between insert and save) the drift is
+    /// negligible. For a long-running library consumer that saves
+    /// repeatedly, the effective on-disk TTL is `ttl * saves_per_ttl`
+    /// — secrets never expire if you save more often than `ttl`.
+    /// Library consumers that need a hard TTL must call `save_to_disk`
+    /// at most once per `ttl` interval, or pre-evict expired entries
+    /// out-of-band before saving.
     #[cfg(feature = "cache-persistent")]
     pub fn save_to_disk(&self) -> Result<(), Error> {
         let Some(store) = &self.persistent else {

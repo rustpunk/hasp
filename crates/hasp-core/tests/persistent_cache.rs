@@ -135,6 +135,51 @@ fn load_emits_cache_load_audit_event() {
 }
 
 #[test]
+fn aead_tamper_emits_cache_tamper_rejected_audit_event() {
+    // Regression guard. A bit-flip inside the ciphertext must surface
+    // as `cache.tamper_rejected` so an operator can distinguish a
+    // clean cold start from a hostile mutation.
+    mock_keyring_once();
+    let dir = tempfile::tempdir().unwrap();
+    let token = install_hardening().unwrap();
+
+    // First invocation: insert + save.
+    {
+        let cache = ProcessCache::new(&policy_in(dir.path(), "tamper-event"), token, None)
+            .unwrap()
+            .unwrap();
+        cache.insert(
+            hasp_core::CacheKey::new("env", "X"),
+            Arc::new(SecretString::new("v".to_string().into())),
+        );
+        cache.save_to_disk().unwrap();
+    }
+
+    // Flip a byte past magic + nonce.
+    let path = dir.path().join("cache.bin");
+    let mut bytes = std::fs::read(&path).unwrap();
+    let flip = 4 /* magic */ + 24 /* nonce */ + 4;
+    bytes[flip] ^= 0xff;
+    std::fs::write(&path, &bytes).unwrap();
+
+    // Second invocation: load must emit cache.tamper_rejected.
+    let sink: Arc<CaptureSink> = Arc::new(CaptureSink::default());
+    let _cache = ProcessCache::new(
+        &policy_in(dir.path(), "tamper-event"),
+        token,
+        Some(sink.clone()),
+    )
+    .unwrap()
+    .unwrap();
+
+    let events = sink.events.lock().unwrap().clone();
+    assert!(
+        events.contains(&"cache.tamper_rejected"),
+        "expected cache.tamper_rejected event after AEAD tamper, got {events:?}"
+    );
+}
+
+#[test]
 fn save_emits_cache_save_audit_event() {
     mock_keyring_once();
     let dir = tempfile::tempdir().unwrap();

@@ -14,8 +14,9 @@
 //! **Fail-closed.** If the OS keyring is unreachable (headless
 //! container without a DBus session bus, locked macOS Keychain, etc.)
 //! `PersistentStore::load` returns `Error::PermissionDenied`. There is
-//! no co-located-key fallback (the Doppler anti-pattern from
-//! `RESEARCH-op-caching.md` §Approach C).
+//! no co-located-key fallback — a symmetric key alongside the
+//! ciphertext is the Doppler anti-pattern: same-uid access already
+//! had the key, and now backup-snapshot exfil does too.
 
 use std::fs;
 use std::io::Write;
@@ -67,6 +68,17 @@ pub struct DecryptedEntry {
     pub expires_at: SystemTime,
 }
 
+/// Result of [`PersistentStore::load`]. `tampered` is `true` when the
+/// on-disk file existed but failed AEAD verification (or a layer below
+/// it: short input, bad magic, plaintext unparseable). The caller is
+/// expected to treat the cache as cold AND emit a
+/// `cache.tamper_rejected` audit event — distinguishing actual
+/// tampering from a clean cold start.
+pub struct LoadOutcome {
+    pub entries: Vec<DecryptedEntry>,
+    pub tampered: bool,
+}
+
 /// Driver for the encrypted cache file: load on construction, save on
 /// `Store::save_cache()`, tamper-rejection treated as cold cache.
 pub struct PersistentStore {
@@ -90,16 +102,22 @@ impl PersistentStore {
 
     /// Load all unexpired entries from the encrypted file.
     ///
-    /// Returns `Ok(Vec::new())` when the file does not exist (cold
-    /// cache) or when AEAD verification fails (tamper-rejection;
-    /// callers should emit `cache.tamper_rejected` audit and proceed
-    /// as cold). Returns `Err(Error::PermissionDenied)` when the
-    /// OS keyring is unreachable — the fail-closed contract.
-    pub fn load(&self) -> Result<Vec<DecryptedEntry>, Error> {
+    /// `LoadOutcome::tampered` is `true` when the file existed but
+    /// failed AEAD verification (or magic / plaintext parse); the
+    /// caller emits `cache.tamper_rejected` and proceeds with a cold
+    /// cache. Missing file ⇒ `tampered = false`, empty entries.
+    /// Returns `Err(Error::PermissionDenied)` when the OS keyring is
+    /// unreachable — the fail-closed contract.
+    pub fn load(&self) -> Result<LoadOutcome, Error> {
         let key = fetch_or_create_key(&self.service, &self.account)?;
         let raw = match fs::read(&self.path) {
             Ok(bytes) => bytes,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(LoadOutcome {
+                    entries: Vec::new(),
+                    tampered: false,
+                });
+            }
             Err(e) => {
                 return Err(Error::Backend {
                     scheme: "cache",
@@ -108,7 +126,7 @@ impl PersistentStore {
                 });
             }
         };
-        decrypt_envelope(&raw, &key)
+        Ok(decrypt_envelope(&raw, &key))
     }
 
     /// Encrypt and atomically write the given entries.
@@ -193,15 +211,22 @@ impl PersistentStore {
     }
 }
 
-/// AEAD-decrypt the cache file. Returns an empty vec on tamper /
-/// truncation so the caller can proceed as cold cache without forcing
-/// the user to delete the file by hand.
-fn decrypt_envelope(raw: &[u8], key: &[u8; KEY_LEN]) -> Result<Vec<DecryptedEntry>, Error> {
+/// AEAD-decrypt the cache file. Returns `tampered = true` on any path
+/// where the file existed but failed validation (short input, bad
+/// magic, AEAD tag mismatch, plaintext unparseable). The caller
+/// proceeds with a cold cache; the `tampered` flag drives the
+/// downstream `cache.tamper_rejected` audit event so an operator can
+/// distinguish a clean cold start from a hostile bit-flip.
+fn decrypt_envelope(raw: &[u8], key: &[u8; KEY_LEN]) -> LoadOutcome {
+    let cold = LoadOutcome {
+        entries: Vec::new(),
+        tampered: true,
+    };
     if raw.len() < FILE_MAGIC.len() + NONCE_LEN + 16 {
-        return Ok(Vec::new());
+        return cold;
     }
     if &raw[..FILE_MAGIC.len()] != FILE_MAGIC {
-        return Ok(Vec::new());
+        return cold;
     }
     let nonce_start = FILE_MAGIC.len();
     let nonce_end = nonce_start + NONCE_LEN;
@@ -210,11 +235,11 @@ fn decrypt_envelope(raw: &[u8], key: &[u8; KEY_LEN]) -> Result<Vec<DecryptedEntr
     let cipher = XChaCha20Poly1305::new(key.into());
     let plaintext = match cipher.decrypt(nonce, ciphertext) {
         Ok(p) => p,
-        Err(_) => return Ok(Vec::new()),
+        Err(_) => return cold,
     };
     let env: Envelope = match serde_json::from_slice(&plaintext) {
         Ok(e) => e,
-        Err(_) => return Ok(Vec::new()),
+        Err(_) => return cold,
     };
 
     let now = SystemTime::now()
@@ -244,7 +269,10 @@ fn decrypt_envelope(raw: &[u8], key: &[u8; KEY_LEN]) -> Result<Vec<DecryptedEntr
             expires_at: UNIX_EPOCH + Duration::from_secs(entry.expires_at_unix),
         });
     }
-    Ok(out)
+    LoadOutcome {
+        entries: out,
+        tampered: false,
+    }
 }
 
 fn encrypt_envelope(entries: &[DecryptedEntry], key: &[u8; KEY_LEN]) -> Result<Vec<u8>, Error> {
@@ -445,8 +473,10 @@ mod tests {
         ];
         store.save(&entries).unwrap();
         let loaded = store.load().unwrap();
-        assert_eq!(loaded.len(), 2);
+        assert!(!loaded.tampered);
+        assert_eq!(loaded.entries.len(), 2);
         let env_e = loaded
+            .entries
             .iter()
             .find(|e| e.key.scheme == "env" && e.key.identity == "USER")
             .unwrap();
@@ -466,7 +496,11 @@ mod tests {
         };
         store.save(&[past]).unwrap();
         let loaded = store.load().unwrap();
-        assert!(loaded.is_empty(), "expired entries must not survive load");
+        assert!(
+            loaded.entries.is_empty(),
+            "expired entries must not survive load"
+        );
+        assert!(!loaded.tampered);
     }
 
     #[test]
@@ -485,8 +519,12 @@ mod tests {
 
         let loaded = store.load().unwrap();
         assert!(
-            loaded.is_empty(),
+            loaded.entries.is_empty(),
             "tampered file must surface as cold cache"
+        );
+        assert!(
+            loaded.tampered,
+            "AEAD-tampered file must set tampered=true so the caller can emit cache.tamper_rejected"
         );
     }
 
@@ -496,7 +534,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = store_in(dir.path(), "missing");
         let loaded = store.load().unwrap();
-        assert!(loaded.is_empty());
+        assert!(loaded.entries.is_empty());
+        assert!(
+            !loaded.tampered,
+            "missing file is not the same as tamper-rejected; tampered must be false"
+        );
     }
 
     #[cfg(unix)]

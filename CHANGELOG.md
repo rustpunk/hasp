@@ -109,18 +109,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `hasp_core::install()` returning a `HardeningToken` witness type;
   re-exported via `hasp::install_hardening`.
 - `hasp cache clear` CLI subcommand. Drops every in-process cache
-  entry (and, when the `cache-persistent` Cargo feature ships its
-  implementation, will also remove the on-disk encrypted cache file
-  and its OS-keyring-bound key).
-- `cache-persistent` Cargo feature scaffold on `hasp-core` (#8
-  Approach A). Compiles the `CachePolicy::Persistent(PersistentPolicy)`
-  variant so binary builders can wire `HASP_CACHE_TTL` and the
-  `hasp cache clear` subcommand today; the encrypted-file
-  implementation (XChaCha20-Poly1305 + OS-keyring key + UUID-tuple
-  cache keys for `op://`) lands in a follow-up so `hasp-core` stays
-  free of platform-specific keyring dependencies for now. Today,
-  constructing a `Persistent` policy falls back to the in-process
-  policy with the persistent TTL/capacity.
+  entry; with the `cache-persistent` feature also removes the
+  encrypted on-disk file (see the #22a entry above for the full
+  shape, including `--forget-key`).
+- `CachePolicy::Persistent(PersistentPolicy)` variant on
+  `hasp-core` (#8 Approach A). Originally landed as a scaffold;
+  the real encrypted-file implementation ships in #22a (see top of
+  this release).
 - `HASP_CACHE_TTL=<seconds>` env var. Overrides the default cache
   TTL (1..=3600). Values above 3600 clamp to AWS Agent's published
   1-hour ceiling; `0` disables the cache entirely.

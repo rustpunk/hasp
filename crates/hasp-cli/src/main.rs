@@ -369,6 +369,15 @@ fn run(cli: Cli, hardening_token: hasp::HardeningToken) -> Result<(), (i32, Stri
         }
     }
 
+    // `cache clear` is the one verb that must NOT trigger an
+    // exit-path save: the user just asked us to remove the on-disk
+    // file (and optionally drop the keyring entry), so re-writing it
+    // moments later would silently undo the clear. Every other verb
+    // — including unrelated commands like `Man` and `Complete` —
+    // exits with `save_cache` invoked; it no-ops outside Persistent
+    // mode, so the only behavioral surprise is on the clear path.
+    let suppress_save = matches!(cli.command, Command::Cache { .. });
+
     match cli.command {
         Command::Get { address, field } => {
             if cli.verbose > 0 && !cli.quiet {
@@ -618,10 +627,13 @@ fn run(cli: Cli, hardening_token: hasp::HardeningToken) -> Result<(), (i32, Stri
     // Persist the cache snapshot on the success path. No-op unless
     // the cache is in Persistent mode. Errors here are non-fatal —
     // the verbs already succeeded; reporting a save-time failure
-    // through the same channel would be confusing.
-    if let Err(e) = store.save_cache() {
-        if !cli.quiet {
-            eprintln!("hasp: cache save failed: {e}");
+    // through the same channel would be confusing. Skipped for
+    // `cache clear` to keep `--forget-key` honest.
+    if !suppress_save {
+        if let Err(e) = store.save_cache() {
+            if !cli.quiet {
+                eprintln!("hasp: cache save failed: {e}");
+            }
         }
     }
     Ok(())
