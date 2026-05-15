@@ -594,10 +594,18 @@ fn run_bw_inner(
 }
 
 /// Splice a secret string into the JSON document at `path`. The path
-/// uses the same dot-separated grammar as `extract_field` (object keys
-/// and integer array indices). Missing intermediate keys are not
-/// created — write paths that need to instantiate structure should
-/// call `build_login_item` instead.
+/// uses the same dot-separated grammar as `extract_field` (object
+/// keys and integer array indices).
+///
+/// Intermediate segments must resolve to an existing key or array
+/// index — a missing intermediate returns `NotFound` (write paths
+/// that need to instantiate nested structure should call
+/// `build_login_item` instead). The **leaf** segment is created if
+/// it is missing on an existing parent object: `bw://item/login.totp`
+/// against a login without a `totp` field adds it, matching
+/// Bitwarden's whole-item-replace contract. Leaf indices on arrays
+/// require the index to exist; out-of-bounds returns `NotFound`
+/// rather than appending.
 fn splice_field(data: &mut serde_json::Value, path: &str, value: &str) -> Result<(), Error> {
     let segments: Vec<&str> = path.split('.').collect();
     if segments.iter().any(|s| s.is_empty()) {

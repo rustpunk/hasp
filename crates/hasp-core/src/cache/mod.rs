@@ -28,7 +28,8 @@
 //! `RESEARCH-op-caching.md`) lives behind the `cache-persistent`
 //! Cargo feature and is opt-in by binary builders only.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use moka::notification::RemovalCause;
@@ -190,6 +191,14 @@ impl CachePolicy {
 pub struct ProcessCache {
     inner: Cache<CacheKey, Arc<SecretString>>,
     ttl: Duration,
+    /// Per-entry insertion timestamps. moka does not expose
+    /// `inserted_at` from its iter API, so the cache tracks it here
+    /// for the `save_to_disk` snapshot — every saved entry's
+    /// `expires_at` is `inserted_at + ttl`, not `now + ttl`. Without
+    /// this, a daemon that calls `save_to_disk` repeatedly would
+    /// extend every entry's effective TTL on each save (an AWS-Agent
+    /// envelope violation for long-running library consumers).
+    inserted_at: Arc<Mutex<HashMap<CacheKey, SystemTime>>>,
     #[cfg(feature = "cache-persistent")]
     persistent: Option<Arc<PersistentStore>>,
     audit_sink: Option<Arc<dyn AuditSink>>,
@@ -241,6 +250,9 @@ impl ProcessCache {
         #[cfg(feature = "cache-persistent")] persistent: Option<Arc<PersistentStore>>,
     ) -> Self {
         let sink = audit_sink.clone();
+        let inserted_at: Arc<Mutex<HashMap<CacheKey, SystemTime>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let inserted_at_listener = inserted_at.clone();
         let inner = Cache::builder()
             .max_capacity(capacity)
             .time_to_live(ttl)
@@ -250,6 +262,9 @@ impl ProcessCache {
                 // runs this listener synchronously on the
                 // eviction-causing thread.
                 drop(v);
+                if let Ok(mut m) = inserted_at_listener.lock() {
+                    m.remove(&*k);
+                }
                 if matches!(cause, RemovalCause::Expired) {
                     if let Some(s) = &sink {
                         s.emit(&AuditEvent::cache(CacheEvent::Expire, k.scheme));
@@ -260,6 +275,7 @@ impl ProcessCache {
         Self {
             inner,
             ttl,
+            inserted_at,
             #[cfg(feature = "cache-persistent")]
             persistent,
             audit_sink,
@@ -304,6 +320,16 @@ impl ProcessCache {
                 sink.emit(&AuditEvent::cache(CacheEvent::TamperRejected, "all"));
             }
         }
+        // Re-hydrate insertion timestamps from disk so a subsequent
+        // `save_to_disk` preserves the original entry's expiry
+        // envelope instead of resetting it. `inserted = expires_at -
+        // ttl` reverses the formula used at save time.
+        if let Ok(mut m) = cache.inserted_at.lock() {
+            for e in &outcome.entries {
+                let inserted = e.expires_at.checked_sub(p.ttl).unwrap_or(e.expires_at);
+                m.insert(e.key.clone(), inserted);
+            }
+        }
         for e in outcome.entries {
             cache.inner.insert(e.key, e.value);
         }
@@ -320,18 +346,31 @@ impl ProcessCache {
         self.inner.get(key)
     }
 
-    /// Insert or replace a value.
+    /// Insert or replace a value. Also stamps the entry with the
+    /// current insertion time so that `save_to_disk` can emit a
+    /// per-entry `expires_at` instead of pinning every saved entry
+    /// to `now + ttl`. On a replace, the timestamp resets — the
+    /// entry behaves as fresh.
     pub fn insert(&self, key: CacheKey, value: Arc<SecretString>) {
+        if let Ok(mut m) = self.inserted_at.lock() {
+            m.insert(key.clone(), SystemTime::now());
+        }
         self.inner.insert(key, value);
     }
 
     /// Invalidate a single entry. No-op if the key is absent.
     pub fn invalidate(&self, key: &CacheKey) {
+        if let Ok(mut m) = self.inserted_at.lock() {
+            m.remove(key);
+        }
         self.inner.invalidate(key);
     }
 
     /// Drop every entry. Used by `hasp cache clear` and tests.
     pub fn invalidate_all(&self) {
+        if let Ok(mut m) = self.inserted_at.lock() {
+            m.clear();
+        }
         self.inner.invalidate_all();
     }
 
@@ -353,16 +392,15 @@ impl ProcessCache {
     /// constructed without a `Persistent` policy. Emits `cache.save`
     /// on success; errors surface to the caller.
     ///
-    /// **TTL drift caveat.** Each saved entry's `expires_at` is
-    /// recomputed as `SystemTime::now() + self.ttl` because moka does
-    /// not expose per-entry insertion timestamps. For a CLI (one save
-    /// per process, sub-second between insert and save) the drift is
-    /// negligible. For a long-running library consumer that saves
-    /// repeatedly, the effective on-disk TTL is `ttl * saves_per_ttl`
-    /// — secrets never expire if you save more often than `ttl`.
-    /// Library consumers that need a hard TTL must call `save_to_disk`
-    /// at most once per `ttl` interval, or pre-evict expired entries
-    /// out-of-band before saving.
+    /// Each saved entry's `expires_at` is `inserted_at + ttl`, drawn
+    /// from the cache's per-entry insertion-time map (populated on
+    /// `insert`, cleared on eviction). Entries whose computed
+    /// `expires_at` is already in the past at save time are dropped
+    /// before write — the on-disk envelope never carries already-
+    /// expired entries, and repeated saves do not extend the
+    /// effective TTL. A daemon that calls `save_to_disk` every
+    /// second sees the same per-secret expiry envelope as one save
+    /// per `ttl`.
     #[cfg(feature = "cache-persistent")]
     pub fn save_to_disk(&self) -> Result<(), Error> {
         let Some(store) = &self.persistent else {
@@ -370,14 +408,30 @@ impl ProcessCache {
         };
         self.inner.run_pending_tasks();
         let now = SystemTime::now();
+        // Clone the insertion-time map under the lock, then release
+        // it before iterating the cache. moka's iter could re-enter
+        // the eviction listener (which also takes the lock) on a
+        // racing expiry, so holding the lock across iter would
+        // deadlock.
+        let inserted_at_snapshot: HashMap<CacheKey, SystemTime> = self
+            .inserted_at
+            .lock()
+            .map(|m| m.clone())
+            .unwrap_or_default();
         let mut snapshot: Vec<DecryptedEntry> =
             Vec::with_capacity(self.inner.entry_count() as usize);
         for entry in self.inner.iter() {
             let (k, v) = entry;
+            let key = (*k).clone();
+            let inserted = inserted_at_snapshot.get(&key).copied().unwrap_or(now);
+            let expires_at = inserted + self.ttl;
+            if expires_at <= now {
+                continue;
+            }
             snapshot.push(DecryptedEntry {
-                key: (*k).clone(),
+                key,
                 value: v,
-                expires_at: now + self.ttl,
+                expires_at,
             });
         }
         store.save(&snapshot)?;

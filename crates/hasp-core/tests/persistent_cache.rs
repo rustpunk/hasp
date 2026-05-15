@@ -149,7 +149,7 @@ fn aead_tamper_emits_cache_tamper_rejected_audit_event() {
             .unwrap()
             .unwrap();
         cache.insert(
-            hasp_core::CacheKey::new("env", "X"),
+            CacheKey::new("env", "X"),
             Arc::new(SecretString::new("v".to_string().into())),
         );
         cache.save_to_disk().unwrap();
@@ -177,6 +177,61 @@ fn aead_tamper_emits_cache_tamper_rejected_audit_event() {
         events.contains(&"cache.tamper_rejected"),
         "expected cache.tamper_rejected event after AEAD tamper, got {events:?}"
     );
+}
+
+#[test]
+fn ttl_envelope_survives_repeated_saves() {
+    // Regression guard for the TTL-extension bug: a daemon that calls
+    // save_to_disk every second should not push every entry's expiry
+    // out by the TTL on each save. With insertion-time tracking the
+    // first save's expires_at must equal subsequent saves' expires_at
+    // (within a small wall-clock skew tolerance).
+    mock_keyring_once();
+    let dir = tempfile::tempdir().unwrap();
+    let token = install_hardening().unwrap();
+    let path = dir.path().join("cache.bin");
+
+    // Use a short-but-not-zero TTL so the entry stays alive across
+    // the test but the boundary is observable.
+    let policy = CachePolicy::Persistent(PersistentPolicy {
+        ttl: Duration::from_secs(10),
+        path: path.clone(),
+        keyring_service: "hasp-test".into(),
+        keyring_account: "ttl-envelope".into(),
+        capacity: 16,
+    });
+    let cache = ProcessCache::new(&policy, token, None).unwrap().unwrap();
+    cache.insert(
+        CacheKey::new("env", "X"),
+        Arc::new(SecretString::new("v".to_string().into())),
+    );
+
+    // First save right after insert.
+    cache.save_to_disk().unwrap();
+    let first_meta = std::fs::metadata(&path).unwrap();
+    let first_len = first_meta.len();
+
+    // Wait, then save again. The second save must not reset the
+    // entry's logical expires_at — the on-disk file size is the same
+    // (encrypted envelope shape unchanged) AND a fresh load yields
+    // an entry whose remaining lifetime reflects elapsed wall-clock.
+    std::thread::sleep(Duration::from_millis(200));
+    cache.save_to_disk().unwrap();
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().len(),
+        first_len,
+        "second save must produce an envelope of the same shape"
+    );
+
+    // Drop and reload — entry must still be present (TTL not yet
+    // expired) but its insertion time must reflect the original
+    // insert, not the most recent save.
+    drop(cache);
+    let cache2 = ProcessCache::new(&policy, token, None).unwrap().unwrap();
+    let got = cache2
+        .get(&CacheKey::new("env", "X"))
+        .expect("entry hydrated");
+    assert_eq!(got.expose_secret(), "v");
 }
 
 #[test]

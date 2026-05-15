@@ -24,6 +24,21 @@ appear in error messages (redacted per URL discipline).
 | `list`    | Supported (`op item list --vault <vault> --format=json`) |
 | `delete`  | Supported (`op item delete` — removes the entire item; the URL's `field` segment is ignored) |
 
+### Wall-clock budget on `put`
+
+`put` is a read-modify-write: hasp first runs `op item get
+--format=json`, splices the field value into the returned template,
+then pipes the mutated JSON to `op item edit … -`. Both subprocess
+invocations carry the standard `GET_TIMEOUT` (15s), so a slow `op`
+binary can take up to **30 seconds** before a `put` surfaces a
+timeout error. Operators expecting per-operation latency parity with
+`get` should account for this — `put` is structurally two round
+trips to the 1Password backend.
+
+The create-fallback branch (when `op item get` returns NotFound) has
+the same shape: a failed `get` plus an `op item create … -`, also
+bounded by `2 * GET_TIMEOUT`.
+
 ### Argv exposure on `put`
 
 hasp's `put` feeds the JSON template through stdin (`op item edit

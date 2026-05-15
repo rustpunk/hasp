@@ -18,6 +18,15 @@
 lists every item in the unlocked vault; any other host is forwarded to
 `bw list items --search`.
 
+**Sentinel collision caveat.** `_` is reserved for `list`; an item
+literally named `_` cannot be enumerated via `hasp list bw://_`
+(that URL is intercepted as the "list all" sentinel). `hasp get
+bw://_/login.password` still resolves the literal name on get/put/
+delete because the get-grammar URL has a path segment, distinguishing
+it from the list-grammar URL. Bitwarden discourages one-character
+names and this collision has not been observed in practice; an
+escape syntax can be added if a user runs into it.
+
 Item name and field path are identifiers, not secret values. They may
 appear in error messages (redacted per URL discipline).
 

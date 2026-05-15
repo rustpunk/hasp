@@ -427,7 +427,11 @@ fn run(cli: Cli, hardening_token: hasp::HardeningToken) -> Result<(), (i32, Stri
             // mapping (auth=5, transport=4, etc.) so callers can still
             // distinguish "key missing" from "could not check".
             let exists = store.exists(&url).map_err(cli_error)?;
-            std::process::exit(if exists { EXIT_SUCCESS } else { EXIT_USAGE });
+            exit_after_save(
+                &store,
+                cli.quiet,
+                if exists { EXIT_SUCCESS } else { EXIT_USAGE },
+            );
         }
         Command::Cp {
             src,
@@ -547,10 +551,11 @@ fn run(cli: Cli, hardening_token: hasp::HardeningToken) -> Result<(), (i32, Stri
                 eprintln!("hasp: diff {a} vs {b} -> {outcome:?}");
             }
             // 0 = match, 1 = differ. Parallels `hasp exists`.
-            std::process::exit(match outcome {
+            let code = match outcome {
                 hasp::DiffOutcome::Match => EXIT_SUCCESS,
                 hasp::DiffOutcome::Differ => EXIT_USAGE,
-            });
+            };
+            exit_after_save(&store, cli.quiet, code);
         }
         Command::Run {
             env,
@@ -567,7 +572,7 @@ fn run(cli: Cli, hardening_token: hasp::HardeningToken) -> Result<(), (i32, Stri
                 cli.quiet,
                 cli.verbose,
             )?;
-            std::process::exit(exit);
+            exit_after_save(&store, cli.quiet, exit);
         }
         Command::Profile { action } => {
             let profiles_path = profile_allow::profiles_toml_path()
@@ -979,6 +984,22 @@ pub(crate) fn precondition_err(message: String) -> (i32, String) {
 /// failure surfaced through `StoreBuilder::try_build`) into the
 /// `(code, message)` tuple `run` propagates. Reuses the existing
 /// taxonomy mapping so `PermissionDenied` surfaces as exit code 3.
+/// Save the persistent cache before exiting with `code`. Used by
+/// verbs that need to set a non-zero exit code based on a
+/// non-error outcome (`exists`, `diff`, `run`) — those paths
+/// previously bypassed the trailing `store.save_cache()` because
+/// `process::exit` short-circuits the `run` function. Save-time
+/// failures are surfaced to stderr (unless `--quiet`) but never
+/// alter the chosen exit code, mirroring the normal-exit path.
+fn exit_after_save(store: &hasp::Store, quiet: bool, code: i32) -> ! {
+    if let Err(e) = store.save_cache() {
+        if !quiet {
+            eprintln!("hasp: cache save failed: {e}");
+        }
+    }
+    std::process::exit(code);
+}
+
 pub(crate) fn precondition_err_from_hasp(err: hasp::Error) -> (i32, String) {
     let code = exit_code(&err);
     let message = fmt_error(err);

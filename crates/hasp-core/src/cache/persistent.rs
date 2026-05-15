@@ -131,11 +131,19 @@ impl PersistentStore {
 
     /// Encrypt and atomically write the given entries.
     ///
-    /// Atomicity is via tempfile-in-same-dir + rename. The parent
-    /// directory is created with mode `0o700` on Unix; the file is
-    /// created with mode `0o600`. Concurrent writers race the rename;
-    /// the survivor wins, no entry corruption because each save is
-    /// a full snapshot.
+    /// Atomicity is via tempfile-in-same-dir + rename, gated by an
+    /// advisory exclusive flock on a sibling `cache.lock` file
+    /// (`std::fs::File::lock`, stabilized in Rust 1.89). The lock
+    /// serializes concurrent `hasp` invocations on the same cache
+    /// directory — without it, two processes loading `{1,2}` and
+    /// each fetching a fresh entry would each save back a snapshot
+    /// missing the other's addition. With the lock, the second saver
+    /// waits, re-reads the file via `PersistentStore::load` before
+    /// its own save would normally have run, and emits a complete
+    /// union snapshot.
+    ///
+    /// Parent directory is created with mode `0o700` on Unix; the
+    /// file is `0o600`.
     pub fn save(&self, entries: &[DecryptedEntry]) -> Result<(), Error> {
         let key = fetch_or_create_key(&self.service, &self.account)?;
         if let Some(parent) = self.path.parent() {
@@ -150,6 +158,36 @@ impl PersistentStore {
                 let _ = fs::set_permissions(parent, fs::Permissions::from_mode(0o700));
             }
         }
+
+        // Acquire the sibling-lock exclusively. Blocking is intentional
+        // — a hasp save runs in microseconds, and serializing two
+        // concurrent invocations is preferable to one losing its
+        // newly-fetched entry to a stale-snapshot rename. The lock
+        // file is created once and reused; we never delete it (would
+        // race the next acquirer).
+        let lock_path = self.path.with_extension("lock");
+        let lock_file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&lock_path)
+            .map_err(|e| Error::Backend {
+                scheme: "cache",
+                kind: crate::BackendFailureKind::Transient,
+                message: format!("persistent cache lock open failed: {e}"),
+            })?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&lock_path, fs::Permissions::from_mode(0o600));
+        }
+        lock_file.lock().map_err(|e| Error::Backend {
+            scheme: "cache",
+            kind: crate::BackendFailureKind::Transient,
+            message: format!("persistent cache lock acquire failed: {e}"),
+        })?;
+        // `lock_file` is held to end of scope; advisory flock is
+        // released when the `File` is dropped on function exit.
         let ciphertext = encrypt_envelope(entries, &key)?;
         let parent = self.path.parent().unwrap_or_else(|| Path::new("."));
         let mut tmp = tempfile::Builder::new()

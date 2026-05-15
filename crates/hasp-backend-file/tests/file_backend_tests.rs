@@ -47,7 +47,15 @@ fn get_into_matches_get_raw() {
 }
 
 #[test]
-fn get_into_capacity_matches_length_when_raw() {
+fn get_into_raw_length_matches_payload() {
+    // The "no realloc" property of the sized-read helper is verified
+    // by inspection (try_reserve_exact + read_to_string + capacity-
+    // equal-length into_boxed_str). At the test level we can only
+    // assert the observable: with `?raw=true`, get_into returns
+    // bytes whose length matches the source file exactly — no
+    // trim, no truncation, no padding. A regression that switches
+    // to an unsized read or accidentally trims the raw path would
+    // fail here.
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("exact.txt");
     let payload = "exact-fit-bytes";
@@ -59,11 +67,8 @@ fn get_into_capacity_matches_length_when_raw() {
 
     let mut slot = SecretString::new(String::new().into_boxed_str());
     backend.get_into(&url, &mut slot).unwrap();
-    let bytes = slot.expose_secret().as_bytes();
-    // `Box<str>` length matches its allocation; with `?raw=true` the
-    // intermediate String reservation equalled the read length, so
-    // `into_boxed_str` did not realloc.
-    assert_eq!(bytes.len(), payload.len());
+    assert_eq!(slot.expose_secret().len(), payload.len());
+    assert_eq!(slot.expose_secret(), payload);
 }
 
 #[test]
