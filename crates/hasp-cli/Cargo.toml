@@ -23,6 +23,11 @@ aws-sm = ["hasp/aws-sm"]
 aws-ssm = ["hasp/aws-ssm"]
 gcp-sm = ["hasp/gcp-sm"]
 azure-kv = ["hasp/azure-kv"]
+# Off by default — keep the binary lean. Enable for hardened deployments
+# that want HASP_CACHE_TTL to persist across CLI invocations under the
+# AWS-Agent envelope; see crates/hasp-core/Cargo.toml for the threat
+# model boundary.
+cache-persistent = ["hasp/cache-persistent"]
 
 [dependencies]
 hasp = { path = "../hasp" }

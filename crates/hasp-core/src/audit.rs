@@ -46,6 +46,14 @@ pub enum CacheEvent {
     Miss,
     Expire,
     Clear,
+    /// Persistent cache loaded entries from disk.
+    Load,
+    /// Persistent cache snapshot was written to disk.
+    Save,
+    /// Persistent cache file failed AEAD verification and was treated
+    /// as a cold cache. Distinguished from `Miss` because the failure
+    /// mode is mutation, not absence.
+    TamperRejected,
 }
 
 impl CacheEvent {
@@ -56,6 +64,9 @@ impl CacheEvent {
             CacheEvent::Miss => "cache.miss",
             CacheEvent::Expire => "cache.expire",
             CacheEvent::Clear => "cache.clear",
+            CacheEvent::Load => "cache.load",
+            CacheEvent::Save => "cache.save",
+            CacheEvent::TamperRejected => "cache.tamper_rejected",
         }
     }
 }
@@ -179,6 +190,9 @@ impl AuditEvent {
             CacheEvent::Miss => "miss",
             CacheEvent::Expire => "expire",
             CacheEvent::Clear => "clear",
+            CacheEvent::Load => "load",
+            CacheEvent::Save => "save",
+            CacheEvent::TamperRejected => "tamper_rejected",
         };
         Self {
             ts: SystemTime::now(),

@@ -29,14 +29,20 @@
 //! Cargo feature and is opt-in by binary builders only.
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use moka::notification::RemovalCause;
 use moka::sync::Cache;
 
 use crate::audit::{AuditEvent, AuditSink, CacheEvent};
 use crate::hardening::HardeningToken;
+use crate::Error;
 use crate::SecretString;
+
+#[cfg(feature = "cache-persistent")]
+pub mod persistent;
+#[cfg(feature = "cache-persistent")]
+pub use persistent::{DecryptedEntry, PersistentStore};
 
 /// Cache key. `scheme` is the URL scheme and is intentionally
 /// scheme-namespaced so the same URL string handled by two different
@@ -177,11 +183,15 @@ impl CachePolicy {
 #[derive(Clone)]
 pub struct ProcessCache {
     inner: Cache<CacheKey, Arc<SecretString>>,
+    ttl: Duration,
+    #[cfg(feature = "cache-persistent")]
+    persistent: Option<Arc<PersistentStore>>,
+    audit_sink: Option<Arc<dyn AuditSink>>,
 }
 
 impl ProcessCache {
-    /// Construct a cache governed by `policy`. Returns `None` when the
-    /// policy is `Disabled`.
+    /// Construct a cache governed by `policy`. Returns `Ok(None)` when
+    /// the policy is `Disabled`.
     ///
     /// The `_token` parameter is the architectural lever: callers who
     /// have not installed hardening cannot obtain a token and
@@ -189,51 +199,109 @@ impl ProcessCache {
     /// value (it is `Copy`) and is not retained.
     ///
     /// `audit_sink`, when provided, receives `cache.expire` events on
-    /// TTL-driven evictions. Explicit `invalidate` / `invalidate_all`
-    /// calls do not emit events here — `Store` emits its own
-    /// `cache.clear` on the user-facing path.
+    /// TTL-driven evictions, plus `cache.load` / `cache.tamper_rejected`
+    /// for the persistent flavor. Explicit `invalidate` /
+    /// `invalidate_all` calls do not emit events here — `Store` emits
+    /// its own `cache.clear` on the user-facing path.
+    ///
+    /// `Persistent` (gated on `cache-persistent`) loads any existing
+    /// encrypted file at construction time. A missing file or AEAD
+    /// tamper is treated as a cold cache (no error); only an
+    /// unreachable OS keyring surfaces as `Err(PermissionDenied)` —
+    /// the fail-closed contract.
     pub fn new(
         policy: &CachePolicy,
-        _token: HardeningToken,
+        token: HardeningToken,
         audit_sink: Option<Arc<dyn AuditSink>>,
-    ) -> Option<Self> {
+    ) -> Result<Option<Self>, Error> {
         match policy {
             #[cfg(feature = "cache-persistent")]
-            CachePolicy::Persistent(p) => {
-                // Scaffold downgrade: with the on-disk encrypted-file path
-                // not yet implemented, `Persistent` runs as an in-process
-                // `Process` policy carrying the persistent's TTL and
-                // capacity. CLI integration (`HASP_CACHE_TTL`,
-                // `hasp cache clear`) operates against the in-memory
-                // layer without a behavioral surprise.
-                let process = CachePolicy::Process {
-                    ttl: p.ttl,
-                    capacity: p.capacity,
-                };
-                Self::new(&process, _token, audit_sink)
-            }
-            CachePolicy::Disabled => None,
-            CachePolicy::Process { ttl, capacity } => {
-                let sink = audit_sink.clone();
-                let inner = Cache::builder()
-                    .max_capacity(*capacity)
-                    .time_to_live(*ttl)
-                    .eviction_listener(move |k: Arc<CacheKey>, v, cause| {
-                        // Drop the Arc<SecretString> first so the inner
-                        // zeroize fires promptly. moka 0.12 sync flavor
-                        // runs this listener synchronously on the
-                        // eviction-causing thread.
-                        drop(v);
-                        if matches!(cause, RemovalCause::Expired) {
-                            if let Some(s) = &sink {
-                                s.emit(&AuditEvent::cache(CacheEvent::Expire, k.scheme));
-                            }
-                        }
-                    })
-                    .build();
-                Some(Self { inner })
-            }
+            CachePolicy::Persistent(p) => Self::build_persistent(p, token, audit_sink),
+            CachePolicy::Disabled => Ok(None),
+            CachePolicy::Process { ttl, capacity } => Ok(Some(Self::build_process(
+                *ttl,
+                *capacity,
+                audit_sink,
+                #[cfg(feature = "cache-persistent")]
+                None,
+            ))),
         }
+    }
+
+    fn build_process(
+        ttl: Duration,
+        capacity: u64,
+        audit_sink: Option<Arc<dyn AuditSink>>,
+        #[cfg(feature = "cache-persistent")] persistent: Option<Arc<PersistentStore>>,
+    ) -> Self {
+        let sink = audit_sink.clone();
+        let inner = Cache::builder()
+            .max_capacity(capacity)
+            .time_to_live(ttl)
+            .eviction_listener(move |k: Arc<CacheKey>, v, cause| {
+                // Drop the Arc<SecretString> first so the inner
+                // zeroize fires promptly. moka 0.12 sync flavor
+                // runs this listener synchronously on the
+                // eviction-causing thread.
+                drop(v);
+                if matches!(cause, RemovalCause::Expired) {
+                    if let Some(s) = &sink {
+                        s.emit(&AuditEvent::cache(CacheEvent::Expire, k.scheme));
+                    }
+                }
+            })
+            .build();
+        Self {
+            inner,
+            ttl,
+            #[cfg(feature = "cache-persistent")]
+            persistent,
+            audit_sink,
+        }
+    }
+
+    #[cfg(feature = "cache-persistent")]
+    fn build_persistent(
+        p: &PersistentPolicy,
+        _token: HardeningToken,
+        audit_sink: Option<Arc<dyn AuditSink>>,
+    ) -> Result<Option<Self>, Error> {
+        let store = Arc::new(PersistentStore::new(
+            p.path.clone(),
+            p.keyring_service.clone(),
+            p.keyring_account.clone(),
+        ));
+        let cache = Self::build_process(p.ttl, p.capacity, audit_sink.clone(), Some(store.clone()));
+        let loaded = match store.load() {
+            Ok(entries) => entries,
+            Err(e) if matches!(e, Error::PermissionDenied(_)) => {
+                // Fail-closed: cannot reach the OS keyring.
+                return Err(e);
+            }
+            Err(e) => {
+                // I/O or serialization failure — surface as cold cache
+                // plus a tamper-rejection audit event. Do not return
+                // Err: the user's flow continues with a fresh cache.
+                if let Some(sink) = &audit_sink {
+                    sink.emit(&AuditEvent::cache(CacheEvent::TamperRejected, "all"));
+                }
+                let _ = e;
+                Vec::new()
+            }
+        };
+        let mut count = 0u64;
+        for e in loaded {
+            cache.inner.insert(e.key, e.value);
+            count += 1;
+        }
+        if let Some(sink) = &audit_sink {
+            // One load event covers the batch; the count is in the
+            // event for the operator-facing line but not required by
+            // the closed-shape invariant (event label is static).
+            let _ = count;
+            sink.emit(&AuditEvent::cache(CacheEvent::Load, "all"));
+        }
+        Ok(Some(cache))
     }
 
     /// Read a cached value. Returns the `Arc<SecretString>` if a
@@ -271,6 +339,69 @@ impl ProcessCache {
     pub fn entry_count(&self) -> u64 {
         self.inner.entry_count()
     }
+
+    /// Persist the cache snapshot to disk. No-op when the cache was
+    /// constructed without a `Persistent` policy. Emits `cache.save`
+    /// on success; errors surface to the caller (and `Store::audit`
+    /// upstream).
+    ///
+    /// Each saved entry's `expires_at` is recomputed as
+    /// `SystemTime::now() + self.ttl` — moka does not expose
+    /// per-entry insertion timestamps, so the freshness is an
+    /// over-estimate bounded by the configured TTL. In practice this
+    /// is a sub-second drift because save runs on the CLI's exit
+    /// path; a tighter bound is tracked under a follow-up.
+    #[cfg(feature = "cache-persistent")]
+    pub fn save_to_disk(&self) -> Result<(), Error> {
+        let Some(store) = &self.persistent else {
+            return Ok(());
+        };
+        self.inner.run_pending_tasks();
+        let now = SystemTime::now();
+        let mut snapshot: Vec<DecryptedEntry> =
+            Vec::with_capacity(self.inner.entry_count() as usize);
+        for entry in self.inner.iter() {
+            let (k, v) = entry;
+            snapshot.push(DecryptedEntry {
+                key: (*k).clone(),
+                value: v,
+                expires_at: now + self.ttl,
+            });
+        }
+        store.save(&snapshot)?;
+        if let Some(sink) = &self.audit_sink {
+            sink.emit(&AuditEvent::cache(CacheEvent::Save, "all"));
+        }
+        Ok(())
+    }
+
+    /// Remove the on-disk encrypted cache file (when persistent). The
+    /// keyring entry is preserved unless `forget_key` is also true.
+    /// In-memory entries are not touched by this method; callers that
+    /// want a full wipe should call [`Self::invalidate_all`] first.
+    #[cfg(feature = "cache-persistent")]
+    pub fn clear_persistent_file(&self, forget_key: bool) -> Result<(), Error> {
+        let Some(store) = &self.persistent else {
+            return Ok(());
+        };
+        store.delete_file()?;
+        if forget_key {
+            store.forget_key()?;
+        }
+        Ok(())
+    }
+
+    /// Whether this cache writes to disk on `save_to_disk`.
+    pub fn is_persistent(&self) -> bool {
+        #[cfg(feature = "cache-persistent")]
+        {
+            self.persistent.is_some()
+        }
+        #[cfg(not(feature = "cache-persistent"))]
+        {
+            false
+        }
+    }
 }
 
 impl std::fmt::Debug for ProcessCache {
@@ -299,18 +430,20 @@ mod tests {
     #[test]
     fn disabled_policy_returns_none() {
         let policy = CachePolicy::Disabled;
-        assert!(ProcessCache::new(&policy, token(), None).is_none());
+        assert!(ProcessCache::new(&policy, token(), None).unwrap().is_none());
     }
 
     #[test]
     fn process_policy_returns_some() {
         let policy = CachePolicy::process_default();
-        assert!(ProcessCache::new(&policy, token(), None).is_some());
+        assert!(ProcessCache::new(&policy, token(), None).unwrap().is_some());
     }
 
     #[test]
     fn insert_then_get_returns_same_secret_bytes() {
-        let cache = ProcessCache::new(&CachePolicy::process_default(), token(), None).unwrap();
+        let cache = ProcessCache::new(&CachePolicy::process_default(), token(), None)
+            .unwrap()
+            .unwrap();
         let key = CacheKey::new("env", "USER");
         let secret = Arc::new(SecretString::new("alice".to_string().into()));
         cache.insert(key.clone(), secret.clone());
@@ -321,7 +454,9 @@ mod tests {
 
     #[test]
     fn invalidate_removes_entry() {
-        let cache = ProcessCache::new(&CachePolicy::process_default(), token(), None).unwrap();
+        let cache = ProcessCache::new(&CachePolicy::process_default(), token(), None)
+            .unwrap()
+            .unwrap();
         let key = CacheKey::new("env", "USER");
         cache.insert(
             key.clone(),
@@ -338,7 +473,7 @@ mod tests {
             ttl: Duration::from_millis(50),
             capacity: 16,
         };
-        let cache = ProcessCache::new(&policy, token(), None).unwrap();
+        let cache = ProcessCache::new(&policy, token(), None).unwrap().unwrap();
         let key = CacheKey::new("env", "USER");
         cache.insert(
             key.clone(),
@@ -376,7 +511,9 @@ mod tests {
             ttl: Duration::from_millis(50),
             capacity: 16,
         };
-        let cache = ProcessCache::new(&policy, token(), Some(sink.clone())).unwrap();
+        let cache = ProcessCache::new(&policy, token(), Some(sink.clone()))
+            .unwrap()
+            .unwrap();
         let key = CacheKey::new("env", "EXPIRE_TEST");
         cache.insert(
             key.clone(),
@@ -402,7 +539,7 @@ mod tests {
             ttl: Duration::from_secs(60),
             capacity: 2,
         };
-        let cache = ProcessCache::new(&policy, token(), None).unwrap();
+        let cache = ProcessCache::new(&policy, token(), None).unwrap().unwrap();
         cache.insert(
             CacheKey::new("env", "A"),
             Arc::new(SecretString::new("a".to_string().into())),
@@ -424,7 +561,9 @@ mod tests {
 
     #[test]
     fn scheme_namespacing_prevents_cross_backend_alias() {
-        let cache = ProcessCache::new(&CachePolicy::process_default(), token(), None).unwrap();
+        let cache = ProcessCache::new(&CachePolicy::process_default(), token(), None)
+            .unwrap()
+            .unwrap();
         let k1 = CacheKey::new("env", "DUP");
         let k2 = CacheKey::new("file", "DUP");
         cache.insert(

@@ -47,6 +47,9 @@ fn any_cache_event() -> impl Strategy<Value = CacheEvent> {
         CacheEvent::Miss,
         CacheEvent::Expire,
         CacheEvent::Clear,
+        CacheEvent::Load,
+        CacheEvent::Save,
+        CacheEvent::TamperRejected,
     ])
 }
 

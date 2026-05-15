@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `cache-persistent` Cargo feature now ships a real on-disk encrypted
+  cache (#22a). When the feature is built in and `HASP_CACHE_TTL` is
+  set, the per-invocation cache snapshot is written to
+  `$XDG_CACHE_HOME/hasp/cache.bin` on the success exit path, mode
+  `0o600` on Unix, atomically replaced via tempfile + rename. The
+  payload is XChaCha20-Poly1305 AEAD with a 24-byte random nonce per
+  save; the 32-byte symmetric key lives in the OS keyring under
+  service `hasp`, account `cache:<user>` (the first `Entry::get_secret`
+  doubles as the headless-container probe). Loading on `ProcessCache::new`
+  drops TTL-expired entries and treats AEAD-tamper as a cold cache.
+  AWS Secrets Manager Agent's verbatim threat-model warning is
+  reproduced on the type doc: *"After the secret value is pulled into
+  the cache, any user with access to the compute environment can
+  access the secret from the cache."* Fail-closed when the OS keyring
+  is unreachable: `StoreBuilder::try_build` surfaces
+  `Error::PermissionDenied`, which the CLI maps to exit code 3 — no
+  silent file fallback. New audit-event labels `cache.load`,
+  `cache.save`, `cache.tamper_rejected`; `audit_no_leak.rs` proptest
+  extended. `Backend::canonical_cache_key` (UUID-tuple keying for
+  `op://` rename stability) is filed as a separate follow-up issue;
+  this release uses URL-string cache keys.
+- `hasp cache clear --forget-key` removes the OS-keyring entry
+  holding the cache symmetric key on top of the on-disk file
+  deletion. Pre-archive cleanup hook for hardened deployments.
+- `Store::save_cache()` and `StoreBuilder::try_build()` public API
+  surface for library consumers that want the fail-closed keyring
+  contract.
+
 ### Changed
 
 - `op://` `put` no longer carries the secret value on `op`'s argv (#27).
