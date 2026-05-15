@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `bw://` backend `put` / `delete` / `list` (#23). `put` does a
+  read-modify-write against `bw edit item <uuid>` because Bitwarden's
+  CLI replaces the whole item document on every edit — hasp fetches
+  the existing item, splices the field at the URL's `<field-path>`,
+  base64-encodes the JSON, and feeds it through **stdin** rather than
+  argv. On `NotFound` it falls through to `bw create item` with a
+  minimum Login (or SecureNote for `notes`) — also stdin-fed.
+  `delete` is soft (Trash, recoverable for 30 days); `--permanent` is
+  not exposed. `list` honors `bw://<search>` (forwarded to
+  `bw list items --search`) and the sentinel host `bw://_` for an
+  unfiltered listing. Entry URLs prefer the JSON `id` (UUID,
+  rename-stable) over the title, matching the `op://` shape. New
+  workspace dep `base64 = "0.22"` (required because `bw edit/create
+  item` accept payloads only as base64-encoded JSON).
 - `Backend::get_into(&self, &Url, &mut SecretString)` trait method
   (#24): sized-read extension for backends whose transport reveals
   the value length up front (file metadata, HTTP `Content-Length`,

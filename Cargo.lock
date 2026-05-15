@@ -1515,6 +1515,7 @@ dependencies = [
 name = "hasp-backend-bw"
 version = "0.1.0-alpha"
 dependencies = [
+ "base64 0.22.1",
  "hasp-core",
  "serde_json",
  "url",

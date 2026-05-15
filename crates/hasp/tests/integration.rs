@@ -853,32 +853,68 @@ mod bw_tests {
     }
 
     #[test]
-    fn bw_unsupported_operations() {
-        let store = Store::with_defaults();
-        let url = "bw://item/field.path";
-        let secret = hasp::SecretString::new("x".into());
+    fn bw_put_existing_item_succeeds() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _fake = FakeBwGuard::canonical();
+        let _env = EnvGuard::set("BW_SESSION", "fake-session");
 
-        assert!(matches!(
-            store.put(url, &secret),
-            Err(hasp::Error::UnsupportedOperation {
-                scheme: "bw",
-                operation: "put",
-            })
-        ));
-        assert!(matches!(
-            store.list(url),
-            Err(hasp::Error::UnsupportedOperation {
-                scheme: "bw",
-                operation: "list",
-            })
-        ));
-        assert!(matches!(
-            store.delete(url),
-            Err(hasp::Error::UnsupportedOperation {
-                scheme: "bw",
-                operation: "delete",
-            })
-        ));
+        let store = Store::builder().register(hasp::bw()).build();
+        let secret = hasp::SecretString::new("new-password".to_string().into());
+        store
+            .put("bw://test-item/login.password", &secret)
+            .expect("put should succeed for existing item");
+    }
+
+    #[test]
+    fn bw_put_falls_back_to_create_on_not_found() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _fake = FakeBwGuard::canonical();
+        let _env = EnvGuard::set("BW_SESSION", "fake-session");
+
+        let store = Store::builder().register(hasp::bw()).build();
+        let secret = hasp::SecretString::new("created-value".to_string().into());
+        store
+            .put("bw://missing-item/login.password", &secret)
+            .expect("put should fall back to create");
+    }
+
+    #[test]
+    fn bw_delete_existing_item_succeeds() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _fake = FakeBwGuard::canonical();
+        let _env = EnvGuard::set("BW_SESSION", "fake-session");
+
+        let store = Store::builder().register(hasp::bw()).build();
+        store
+            .delete("bw://test-item/login.password")
+            .expect("delete should succeed for existing item");
+    }
+
+    #[test]
+    fn bw_list_returns_uuid_keyed_entries() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _fake = FakeBwGuard::canonical();
+        let _env = EnvGuard::set("BW_SESSION", "fake-session");
+
+        let store = Store::builder().register(hasp::bw()).build();
+        let entries = store.list("bw://_").expect("list-all should succeed");
+        assert!(!entries.is_empty(), "expected at least one entry");
+        assert!(entries
+            .iter()
+            .any(|e| e.url.as_str().contains("uuid-test-item")));
+    }
+
+    #[test]
+    fn bw_list_with_search_filter() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _fake = FakeBwGuard::canonical();
+        let _env = EnvGuard::set("BW_SESSION", "fake-session");
+
+        let store = Store::builder().register(hasp::bw()).build();
+        let entries = store
+            .list("bw://test")
+            .expect("list with search should succeed");
+        assert!(!entries.is_empty());
     }
 }
 

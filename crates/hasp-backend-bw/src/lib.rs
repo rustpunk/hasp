@@ -1,27 +1,38 @@
 //! `bw://` backend for hasp.
 //!
-//! Grammar: `bw://<item>/<field-path>`
-//!   - `<item>`       — Bitwarden item name (host component). Must be non-empty.
-//!   - `<field-path>` — Dot-separated path into the item JSON (first path
-//!     segment). Examples: `login.password`, `notes`, `fields.0.value`.
-//!   - No query parameters.
+//! Grammar:
+//!   - `bw://<item>/<field-path>` — get / put / delete / exists.
+//!   - `bw://<search>` (host only, no path) — list with search filter.
+//!     Sentinel host `_` lists every item in the unlocked vault.
 //!
-//! Supported operations: `get`, `exists`.
-//! `put`, `list`, `delete`: `UnsupportedOperation`.
+//! `<item>` is a Bitwarden item name *or* UUID (write paths resolve
+//! names to UUIDs internally before invoking `bw edit|delete`, which
+//! reject names). `<field-path>` is the dot-separated identifier into
+//! the item JSON; on `put` the inverse mutation splices the value back
+//! into a fetched item document (Bitwarden's write API is whole-item
+//! replace, with no per-field shorthand).
 //!
-//! Authentication is ambient only: `BW_SESSION`. If the variable is missing,
-//! every operation fails fast with `AuthenticationFailed` before spawning
-//! the `bw` binary, preventing biometric unlock prompts in headless contexts.
+//! Authentication is ambient only: `BW_SESSION`. If the variable is
+//! missing, every operation fails fast with `AuthenticationFailed`
+//! before spawning the `bw` binary, preventing biometric unlock prompts
+//! in headless contexts.
 //!
 //! Every `bw` invocation carries a wall-clock timeout (15 s for `get`,
-//! 10 s for `exists`) because `bw` may prompt for unlock in interactive
-//! mode. The `--nointeraction` flag mitigates but does not eliminate hangs.
+//! 10 s for `exists`, 30 s for `list` and write paths). `--nointeraction`
+//! mitigates but does not eliminate hangs.
 //!
-//! `bw get item` returns full item JSON. The backend extracts only the
-//! requested field and wraps it in `SecretString`. `exists` also fetches
-//! full item JSON because `bw` lacks a metadata-only existence probe.
+//! Write payloads (`put` / `create`) are fed via stdin so the
+//! base64-encoded item JSON does not live on the subprocess argv. On
+//! Linux `/proc/<pid>/cmdline` is same-uid readable; stdin shrinks the
+//! exposure window from "full subprocess lifetime" to "pipe consumption
+//! interval" and gates `/proc/<pid>/fd/0` behind `PTRACE_MODE_READ_FSCREDS`.
+//! `delete` is soft (Trash); `--permanent` is not exposed in 0.1.0 —
+//! one misclick stays recoverable for 30 days, mirroring the `op item
+//! delete` posture.
 
-use hasp_core::{Backend, BackendFailureKind, Entry, Error, SecretString};
+use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+use hasp_core::{Backend, BackendFailureKind, Entry, Error, ExposeSecret, SecretString};
+use std::io::Write;
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -84,6 +95,55 @@ impl TryFrom<&Url> for BwUrl {
     }
 }
 
+/// URL shape for the `bw list` grammar: `bw://<search>` (host only).
+///
+/// `search` is forwarded to `bw list items --search`; the sentinel
+/// host `_` lists the whole unlocked vault unfiltered.
+#[derive(Debug)]
+pub struct BwListUrl {
+    pub search: Option<String>,
+}
+
+impl TryFrom<&Url> for BwListUrl {
+    type Error = Error;
+
+    fn try_from(url: &Url) -> Result<Self, Self::Error> {
+        if url.scheme() != "bw" {
+            return Err(Error::InvalidUrl("expected bw:// scheme".into()));
+        }
+        if url.query().is_some() {
+            return Err(Error::InvalidUrl(
+                "bw:// list does not accept query parameters".into(),
+            ));
+        }
+        let host = url
+            .host_str()
+            .ok_or_else(|| Error::InvalidUrl("bw:// list requires a host segment".into()))?;
+        if host.is_empty() {
+            return Err(Error::InvalidUrl(
+                "bw:// list host must not be empty".into(),
+            ));
+        }
+        let extras: Vec<&str> = url
+            .path_segments()
+            .into_iter()
+            .flatten()
+            .filter(|s| !s.is_empty())
+            .collect();
+        if !extras.is_empty() {
+            return Err(Error::InvalidUrl(
+                "bw:// list takes a host only (no path segments)".into(),
+            ));
+        }
+        let search = if host == "_" {
+            None
+        } else {
+            Some(host.to_owned())
+        };
+        Ok(BwListUrl { search })
+    }
+}
+
 /// Subprocess backend for Bitwarden CLI (`bw`).
 ///
 /// Construction runs `bw --version` once. The stored init result is replayed
@@ -108,6 +168,13 @@ const EXISTS_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Wall-clock timeout for the one-time `bw --version` check.
 const VERSION_CHECK_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Wall-clock timeout for write paths and `list`.
+///
+/// `bw list items` decrypts the entire vault client-side; user reports
+/// show 2–3 minutes on 700-item vaults. 30 s is the floor that keeps
+/// CI viable without hiding pathological cases.
+const WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 
 impl BwBackend {
     /// Create a new `BwBackend`.
@@ -189,25 +256,163 @@ impl Backend for BwBackend {
         Ok(SecretString::new(secret.into()))
     }
 
-    fn put(&self, _url: &Url, _value: &SecretString) -> Result<(), Error> {
-        Err(Error::UnsupportedOperation {
-            scheme: "bw",
-            operation: "put",
-        })
+    fn put(&self, url: &Url, value: &SecretString) -> Result<(), Error> {
+        self.ensure_init()?;
+        check_ambient_credentials()?;
+
+        let bw_url = BwUrl::try_from(url)?;
+        let reference = format!("bw://{}/{}", bw_url.item, bw_url.field_path);
+
+        // Read-modify-write: fetch the existing item, splice the field,
+        // re-encode, and edit via stdin. On NotFound, create a fresh
+        // Login item carrying the value.
+        match get_item_envelope(&bw_url.item, WRITE_TIMEOUT, &reference) {
+            Ok(envelope) => {
+                let item_id = envelope
+                    .get("data")
+                    .and_then(|d| d.get("id"))
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| Error::Backend {
+                        scheme: "bw",
+                        kind: BackendFailureKind::Permanent,
+                        message: "bw item response missing id".into(),
+                    })?
+                    .to_owned();
+                let mut data = envelope
+                    .get("data")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null);
+                splice_field(&mut data, &bw_url.field_path, value.expose_secret())?;
+                let payload =
+                    B64.encode(serde_json::to_vec(&data).map_err(|e| Error::Backend {
+                        scheme: "bw",
+                        kind: BackendFailureKind::Permanent,
+                        message: format!("failed to serialize bw edit payload: {e}"),
+                    })?);
+                let output = run_bw_with_stdin(
+                    &["--response", "--nointeraction", "edit", "item", &item_id],
+                    payload.as_bytes(),
+                    WRITE_TIMEOUT,
+                )?;
+                check_response_envelope(&output, &reference)
+            }
+            Err(Error::NotFound(_)) => {
+                let new_item = build_login_item(&bw_url.item, &bw_url.field_path, value)?;
+                let payload =
+                    B64.encode(serde_json::to_vec(&new_item).map_err(|e| Error::Backend {
+                        scheme: "bw",
+                        kind: BackendFailureKind::Permanent,
+                        message: format!("failed to serialize bw create payload: {e}"),
+                    })?);
+                let output = run_bw_with_stdin(
+                    &["--response", "--nointeraction", "create", "item"],
+                    payload.as_bytes(),
+                    WRITE_TIMEOUT,
+                )?;
+                check_response_envelope(&output, &reference)
+            }
+            Err(e) => Err(e),
+        }
     }
 
-    fn list(&self, _url: &Url) -> Result<Vec<Entry>, Error> {
-        Err(Error::UnsupportedOperation {
-            scheme: "bw",
-            operation: "list",
-        })
+    fn list(&self, url: &Url) -> Result<Vec<Entry>, Error> {
+        self.ensure_init()?;
+        check_ambient_credentials()?;
+
+        let list_url = BwListUrl::try_from(url)?;
+        let reference = match &list_url.search {
+            Some(s) => format!("bw://{s}"),
+            None => "bw://_".to_owned(),
+        };
+
+        let mut args: Vec<&str> = vec!["--response", "--nointeraction", "list", "items"];
+        if let Some(s) = list_url.search.as_deref() {
+            args.push("--search");
+            args.push(s);
+        }
+        let output = run_bw_with_timeout(&args, WRITE_TIMEOUT)?;
+
+        let envelope: serde_json::Value =
+            serde_json::from_slice(&output.stdout).map_err(|e| Error::Backend {
+                scheme: "bw",
+                kind: BackendFailureKind::Permanent,
+                message: format!("bw produced invalid JSON: {e}"),
+            })?;
+        let success = envelope
+            .get("success")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if !success {
+            let message = envelope
+                .get("message")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown bw error");
+            return Err(map_bw_response_error(message, &reference));
+        }
+
+        let items = envelope
+            .get("data")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+
+        let mut entries = Vec::with_capacity(items.len());
+        for item in items {
+            let Some(id) = item.get("id").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let name = item
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or(id)
+                .to_owned();
+            let item_type = item.get("type").and_then(|v| v.as_u64());
+            // type 1 = Login, type 2 = SecureNote. Cards / Identities are
+            // not directly addressable as single-secret URLs; skip them
+            // to keep the list output round-trippable through `hasp get`.
+            let default_field = match item_type {
+                Some(1) => "login.password",
+                Some(2) => "notes",
+                _ => continue,
+            };
+            let entry_url = format!("bw://{id}/{default_field}");
+            let parsed = Url::parse(&entry_url).map_err(|e| Error::Backend {
+                scheme: "bw",
+                kind: BackendFailureKind::Permanent,
+                message: format!("bw item list yielded malformed URL: {e}"),
+            })?;
+            entries.push(Entry { name, url: parsed });
+        }
+        Ok(entries)
     }
 
-    fn delete(&self, _url: &Url) -> Result<(), Error> {
-        Err(Error::UnsupportedOperation {
-            scheme: "bw",
-            operation: "delete",
-        })
+    fn delete(&self, url: &Url) -> Result<(), Error> {
+        self.ensure_init()?;
+        check_ambient_credentials()?;
+
+        let bw_url = BwUrl::try_from(url)?;
+        let reference = format!("bw://{}/{}", bw_url.item, bw_url.field_path);
+
+        // Resolve name → UUID. `bw delete item` rejects names.
+        let envelope = get_item_envelope(&bw_url.item, WRITE_TIMEOUT, &reference)?;
+        let item_id = envelope
+            .get("data")
+            .and_then(|d| d.get("id"))
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| Error::Backend {
+                scheme: "bw",
+                kind: BackendFailureKind::Permanent,
+                message: "bw item response missing id".into(),
+            })?
+            .to_owned();
+
+        // Soft delete (Trash). `--permanent` is deliberately unexposed;
+        // mistakes stay recoverable for 30 days, matching the op:// posture.
+        let output = run_bw_with_timeout(
+            &["--response", "--nointeraction", "delete", "item", &item_id],
+            WRITE_TIMEOUT,
+        )?;
+        check_response_envelope(&output, &reference)
     }
 
     fn exists(&self, url: &Url) -> Result<bool, Error> {
@@ -291,12 +496,52 @@ fn get_item_envelope(
 /// main thread polls `try_wait`. This prevents pipe-buffer deadlock when
 /// `bw` emits large JSON or when stderr is verbose.
 fn run_bw_with_timeout(args: &[&str], timeout: Duration) -> Result<std::process::Output, Error> {
+    run_bw_inner(args, None, timeout)
+}
+
+/// Same as `run_bw_with_timeout` but feeds `stdin_bytes` to the child's
+/// stdin (closing the pipe afterward). Used by write paths so the
+/// base64-encoded JSON payload never lives on argv.
+fn run_bw_with_stdin(
+    args: &[&str],
+    stdin_bytes: &[u8],
+    timeout: Duration,
+) -> Result<std::process::Output, Error> {
+    run_bw_inner(args, Some(stdin_bytes), timeout)
+}
+
+fn run_bw_inner(
+    args: &[&str],
+    stdin_bytes: Option<&[u8]>,
+    timeout: Duration,
+) -> Result<std::process::Output, Error> {
+    let stdin_cfg = if stdin_bytes.is_some() {
+        Stdio::piped()
+    } else {
+        Stdio::null()
+    };
     let mut child = Command::new("bw")
         .args(args)
+        .stdin(stdin_cfg)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .map_err(map_spawn_error)?;
+
+    if let Some(bytes) = stdin_bytes {
+        let mut stdin = child.stdin.take().expect("piped stdin");
+        if let Err(e) = stdin.write_all(bytes) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(Error::Backend {
+                scheme: "bw",
+                kind: BackendFailureKind::Transient,
+                message: format!("failed to write bw stdin: {e}"),
+            });
+        }
+        // Drop closes the pipe so `bw` sees EOF and proceeds.
+        drop(stdin);
+    }
 
     let mut stdout_pipe = child.stdout.take().expect("piped stdout");
     let mut stderr_pipe = child.stderr.take().expect("piped stderr");
@@ -346,6 +591,141 @@ fn run_bw_with_timeout(args: &[&str], timeout: Duration) -> Result<std::process:
             }
         }
     }
+}
+
+/// Splice a secret string into the JSON document at `path`. The path
+/// uses the same dot-separated grammar as `extract_field` (object keys
+/// and integer array indices). Missing intermediate keys are not
+/// created — write paths that need to instantiate structure should
+/// call `build_login_item` instead.
+fn splice_field(data: &mut serde_json::Value, path: &str, value: &str) -> Result<(), Error> {
+    let segments: Vec<&str> = path.split('.').collect();
+    if segments.iter().any(|s| s.is_empty()) {
+        return Err(Error::InvalidUrl(
+            "bw:// field path contains empty segment".into(),
+        ));
+    }
+    let mut current = data;
+    for segment in &segments[..segments.len() - 1] {
+        current = if let Ok(idx) = segment.parse::<usize>() {
+            current.get_mut(idx).ok_or_else(|| {
+                Error::NotFound(format!("field index {idx} not found while splicing"))
+            })?
+        } else {
+            current.get_mut(*segment).ok_or_else(|| {
+                Error::NotFound(format!("field '{segment}' not found while splicing"))
+            })?
+        };
+    }
+    let last = segments.last().expect("non-empty path");
+    if let Ok(idx) = last.parse::<usize>() {
+        let target = current.get_mut(idx).ok_or_else(|| {
+            Error::NotFound(format!("field index {idx} not found while splicing"))
+        })?;
+        *target = serde_json::Value::String(value.to_owned());
+    } else {
+        let obj = current.as_object_mut().ok_or_else(|| {
+            Error::NotFound(format!("cannot splice '{last}' into non-object node"))
+        })?;
+        obj.insert(
+            (*last).to_owned(),
+            serde_json::Value::String(value.to_owned()),
+        );
+    }
+    Ok(())
+}
+
+/// Build a minimum-viable Login JSON for `bw create item` from a
+/// `bw://<name>/<field-path>` URL. The field-path is honored when it
+/// starts with `login.` (the Bitwarden Login type accepts
+/// `username|password|totp`); other shapes fall back to a `notes`
+/// SecureNote so the round-trip stays addressable.
+fn build_login_item(
+    name: &str,
+    field_path: &str,
+    value: &SecretString,
+) -> Result<serde_json::Value, Error> {
+    let secret = value.expose_secret();
+    if let Some(rest) = field_path.strip_prefix("login.") {
+        let mut login = serde_json::json!({
+            "username": null,
+            "password": null,
+            "totp": null,
+            "uris": [],
+        });
+        let target = login.as_object_mut().expect("login object");
+        match rest {
+            "username" | "password" | "totp" => {
+                target.insert(
+                    rest.to_owned(),
+                    serde_json::Value::String(secret.to_owned()),
+                );
+            }
+            _ => {
+                return Err(Error::InvalidUrl(format!(
+                    "bw:// create cannot synthesize a Login with field '{field_path}'"
+                )));
+            }
+        }
+        Ok(serde_json::json!({
+            "organizationId": null,
+            "collectionIds": null,
+            "folderId": null,
+            "type": 1,
+            "name": name,
+            "notes": null,
+            "favorite": false,
+            "fields": [],
+            "login": login,
+            "secureNote": null,
+            "card": null,
+            "identity": null,
+            "reprompt": 0,
+        }))
+    } else if field_path == "notes" {
+        Ok(serde_json::json!({
+            "organizationId": null,
+            "collectionIds": null,
+            "folderId": null,
+            "type": 2,
+            "name": name,
+            "notes": secret,
+            "favorite": false,
+            "fields": [],
+            "secureNote": { "type": 0 },
+            "login": null,
+            "card": null,
+            "identity": null,
+            "reprompt": 0,
+        }))
+    } else {
+        Err(Error::InvalidUrl(format!(
+            "bw:// create only supports login.username|password|totp or notes; got '{field_path}'"
+        )))
+    }
+}
+
+/// Parse a `--response` envelope from a write-path invocation and
+/// surface failures through the locked `Error` taxonomy.
+fn check_response_envelope(output: &std::process::Output, reference: &str) -> Result<(), Error> {
+    let envelope: serde_json::Value =
+        serde_json::from_slice(&output.stdout).map_err(|e| Error::Backend {
+            scheme: "bw",
+            kind: BackendFailureKind::Permanent,
+            message: format!("bw produced invalid JSON: {e}"),
+        })?;
+    let success = envelope
+        .get("success")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if success {
+        return Ok(());
+    }
+    let message = envelope
+        .get("message")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown bw error");
+    Err(map_bw_response_error(message, reference))
 }
 
 fn map_spawn_error(err: std::io::Error) -> Error {
