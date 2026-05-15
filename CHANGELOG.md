@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `Backend::get_into(&self, &Url, &mut SecretString)` trait method
+  (#24): sized-read extension for backends whose transport reveals
+  the value length up front (file metadata, HTTP `Content-Length`,
+  keyring entries). The default impl falls back to `get` and copies;
+  `FileBackend` overrides to reserve exactly the byte count returned
+  by `metadata.len()` so the plaintext lives in a single
+  non-reallocated buffer when `?raw=true` is in play. Soft breaking
+  change for downstream `Backend` impls — they inherit the default
+  automatically. Companion helper
+  `hasp_core::secret_mem::read_to_secret_string` exposes the same
+  exact-fit discipline to backends that own their own I/O loop.
 - Per-invocation in-process secret cache (`hasp_core::cache`) replacing
   the previous hand-rolled `Store`-level HashMap cache (#8 Approach E).
   Built on `moka::sync` with an eviction listener that explicitly drops

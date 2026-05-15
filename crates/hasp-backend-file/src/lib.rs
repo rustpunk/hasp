@@ -112,12 +112,13 @@ impl Backend for FileBackend {
 
     fn get(&self, url: &Url) -> Result<SecretString, Error> {
         let file_url = FileUrl::try_from(url)?;
-        let mut contents =
-            std::fs::read_to_string(&file_url.path).map_err(|e| map_io_error(e, &file_url.path))?;
-        if !file_url.raw {
-            trim_one_trailing_newline(&mut contents);
-        }
-        Ok(wrap_secret(contents))
+        read_file_to_secret(&file_url)
+    }
+
+    fn get_into(&self, url: &Url, buf: &mut SecretString) -> Result<(), Error> {
+        let file_url = FileUrl::try_from(url)?;
+        *buf = read_file_to_secret(&file_url)?;
+        Ok(())
     }
 
     fn put(&self, url: &Url, value: &SecretString) -> Result<(), Error> {
@@ -221,6 +222,41 @@ impl Backend for FileBackend {
         let file_url = FileUrl::try_from(url)?;
         Ok(file_url.path.exists())
     }
+}
+
+/// Stat-then-read with exact-fit reservation, then trim, then wrap.
+/// The single `String` allocation receives the full file contents
+/// without realloc when `metadata.len()` matches the read length; the
+/// in-place `trim_one_trailing_newline` truncates without realloc. The
+/// final `wrap_secret` calls `into_boxed_str`, which shrinks the
+/// `String` to its current length — a no-op when `?raw=true` and the
+/// pre-allocation matched; a single bounded realloc when the default
+/// trim removed 1–2 trailing bytes (residue at the freed buffer length
+/// = original file size, unavoidable without unsafe access to the
+/// inner `Vec`).
+fn read_file_to_secret(file_url: &FileUrl) -> Result<SecretString, Error> {
+    use std::io::Read;
+    let mut file =
+        std::fs::File::open(&file_url.path).map_err(|e| map_io_error(e, &file_url.path))?;
+    let size_hint = file
+        .metadata()
+        .ok()
+        .and_then(|m| usize::try_from(m.len()).ok())
+        .unwrap_or(0);
+    let mut contents = String::new();
+    contents
+        .try_reserve_exact(size_hint)
+        .map_err(|e| Error::Backend {
+            scheme: "file",
+            kind: BackendFailureKind::Transient,
+            message: format!("file reservation failed: {e}"),
+        })?;
+    file.read_to_string(&mut contents)
+        .map_err(|e| map_io_error(e, &file_url.path))?;
+    if !file_url.raw {
+        trim_one_trailing_newline(&mut contents);
+    }
+    Ok(wrap_secret(contents))
 }
 
 /// Return the longest leading directory of `pattern` that contains no

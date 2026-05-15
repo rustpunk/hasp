@@ -57,6 +57,20 @@ pub trait Backend: Send + Sync {
     /// platform failures.
     fn get(&self, url: &Url) -> Result<SecretString, Error>;
 
+    /// Fetch into a pre-allocated `SecretString` slot. Backends whose
+    /// transport reveals the value's size up front (file `metadata`,
+    /// HTTP `Content-Length`, keyring entries) override to allocate
+    /// exact-fit so the plaintext never lives in a `String` that was
+    /// grown via realloc. Realloc-on-growth leaks plaintext into freed
+    /// heap segments that are zeroized only on reuse.
+    ///
+    /// The default falls back to `get`; the slot is overwritten on
+    /// success, untouched on error.
+    fn get_into(&self, url: &Url, buf: &mut SecretString) -> Result<(), Error> {
+        *buf = self.get(url)?;
+        Ok(())
+    }
+
     /// Store a secret at the given URL.
     ///
     /// # Errors
