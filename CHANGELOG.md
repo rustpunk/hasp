@@ -11,9 +11,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `StoreBuilder::with_retry(max_retries, base_delay)` wrapping HTTP-backed
   default backends (`aws-sm`, `aws-ssm`, `vault`, `gcp-sm`, `azure-kv`) in a
-  `RetryBackend` decorator with exponential backoff + jitter for transient
-  failures. Local backends (`env`, `file`, `keyring`, `op`, `bw`) are never
-  wrapped.
+  `RetryBackend` decorator with exponential backoff and a deterministic
+  per-attempt spread for transient failures. Local backends (`env`, `file`,
+  `keyring`, `op`, `bw`) are never wrapped.
+- CLI `--retries <N>` and `--retry-base-delay-ms <MS>` global flags exposing
+  `StoreBuilder::with_retry` from the command line (retry applies to
+  HTTP-backed backends only).
 - `Store::batch_get(urls)` and `Store::bulk_put(items)` for multi-secret
   operations with per-item error collection and URL deduplication.
 - `Store::resolve(url)` for dry-run diagnostics (scheme, backend name,

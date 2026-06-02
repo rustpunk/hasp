@@ -13,4 +13,4 @@ url = "2.5"
 secrecy = "0.10"
 
 [dev-dependencies]
-tempfile = "3"
+hasp-core = { path = "../hasp-core", features = ["test-utils"] }

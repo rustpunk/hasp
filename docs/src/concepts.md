@@ -186,9 +186,13 @@ let store = StoreBuilder::with_defaults()
     .build();
 ```
 
-The decorator wraps each HTTP backend with exponential backoff plus
-jitter. Local backends (`env`, `file`, `keyring`, `op`, `bw`) are
-never wrapped — their errors are not transient.
+The decorator wraps each HTTP backend with exponential backoff and a
+small deterministic per-attempt spread. Local backends (`env`, `file`,
+`keyring`, `op`, `bw`) are never wrapped — their errors are not transient.
+
+Retry only wraps HTTP backends, so this example needs an HTTP backend
+feature (`aws-sm`, `aws-ssm`, `vault`, `gcp-sm`, or `azure-kv`)
+enabled. The default build is env-only, so nothing is ever wrapped.
 
 ## Diagnostics
 
@@ -198,9 +202,10 @@ the TTL cache. This powers the CLI `--explain` flag:
 
 ```text
 $ hasp --explain get env://HOME
-URL:      env://HOME
-Backend:  env
-Cache:    miss
+URL:         env://HOME
+Backend:     env
+Cache:       miss
+Operation:   get
 ```
 
 Use it to debug alias expansion, proxy routing, or cache state before

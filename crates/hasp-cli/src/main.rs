@@ -34,6 +34,14 @@ struct Cli {
     /// HTTP CONNECT proxy URL.
     #[arg(long, global = true)]
     proxy_url: Option<String>,
+
+    /// Retry transient HTTP-backend failures up to this many times.
+    #[arg(long, global = true)]
+    retries: Option<u32>,
+
+    /// Base backoff between retries, in milliseconds (used with --retries).
+    #[arg(long, global = true, default_value_t = 100)]
+    retry_base_delay_ms: u64,
 }
 
 #[derive(Subcommand)]
@@ -117,7 +125,11 @@ fn run(cli: Cli) -> Result<(), String> {
         profiles::load_profiles().map_err(|e| format!("failed to load profiles: {e}"))?;
 
     let proxy = resolve_proxy(&cli, &profiles)?;
-    let store = hasp::StoreBuilder::with_defaults().proxy(proxy).build();
+    let mut builder = hasp::StoreBuilder::with_defaults().proxy(proxy);
+    if let Some(n) = cli.retries {
+        builder = builder.with_retry(n, std::time::Duration::from_millis(cli.retry_base_delay_ms));
+    }
+    let store = builder.build();
 
     if cli.explain {
         let address = command_address(&cli);
