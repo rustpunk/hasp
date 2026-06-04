@@ -12,8 +12,6 @@ between the secured and the unsecured. `hasp` is that gateway for every
 secret store you actually use, with feature-gated backends so the
 default binary stays small and pure-Rust.
 
-This is a name reservation for the `hasp` crate. The implementation is in development.
-
 ## Scope
 
 `hasp` is a unified `get` / `put` / `list` / `delete` / `exists` for
@@ -77,7 +75,7 @@ public library API. Both are first-class surfaces.
 
 ## Status
 
-`0.1.0-alpha` — all five CRUD verbs (`get` / `put` / `list` / `delete` /
+`0.2.0-alpha` — all five CRUD verbs (`get` / `put` / `list` / `delete` /
 `exists`) are implemented across every backend. The CLI is functional.
 Library API is stabilized before a `0.1.0` release.
 

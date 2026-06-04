@@ -6,9 +6,13 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 description = "azure-kv:// backend for hasp — Azure Key Vault REST client."
+keywords = ["secrets", "azure", "key-vault", "credentials", "hasp"]
+categories = ["authentication", "api-bindings"]
+documentation = "https://docs.rs/hasp-backend-azure-kv"
+readme = "README.md"
 
 [dependencies]
-hasp-core = { path = "../hasp-core" }
+hasp-core = { workspace = true }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "blocking"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

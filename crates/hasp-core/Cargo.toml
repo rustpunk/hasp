@@ -6,6 +6,10 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 description = "Core contracts, errors, and traits for hasp."
+keywords = ["secrets", "credentials", "secret", "vault", "keyring"]
+categories = ["authentication", "cryptography"]
+documentation = "https://docs.rs/hasp-core"
+readme = "README.md"
 
 [features]
 test-utils = ["dep:tempfile"]

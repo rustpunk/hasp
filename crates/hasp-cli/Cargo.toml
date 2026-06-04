@@ -6,6 +6,9 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 description = "hasp CLI — unified secrets command-line tool. Thin shell over the hasp library."
+keywords = ["secrets", "credentials", "cli", "vault", "keyring"]
+categories = ["command-line-utilities", "authentication"]
+readme = "README.md"
 
 [[bin]]
 name = "hasp"
@@ -25,8 +28,8 @@ gcp-sm = ["hasp/gcp-sm"]
 azure-kv = ["hasp/azure-kv"]
 
 [dependencies]
-hasp = { path = "../hasp" }
-hasp-core = { path = "../hasp-core" }
+hasp = { workspace = true }
+hasp-core = { workspace = true }
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
@@ -42,4 +45,4 @@ sha2 = { workspace = true }
 [dev-dependencies]
 tempfile = "3"
 url = "2.5"
-hasp-core = { path = "../hasp-core", features = ["test-utils"] }
+hasp-core = { workspace = true, features = ["test-utils"] }

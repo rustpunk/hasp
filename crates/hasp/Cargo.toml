@@ -6,6 +6,10 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 description = "Unified secrets library with URL-addressed backends. Part of the rustpunk portfolio."
+keywords = ["secrets", "credentials", "vault", "keyring", "secret-manager"]
+categories = ["authentication", "cryptography", "api-bindings"]
+documentation = "https://docs.rs/hasp"
+readme = "README.md"
 
 [lib]
 path = "src/lib.rs"
@@ -24,21 +28,21 @@ gcp-sm = ["dep:hasp-backend-gcp-sm"]
 azure-kv = ["dep:hasp-backend-azure-kv"]
 
 [dependencies]
-hasp-core = { path = "../hasp-core" }
-hasp-backend-aws-sm = { path = "../hasp-backend-aws-sm", optional = true }
-hasp-backend-aws-ssm = { path = "../hasp-backend-aws-ssm", optional = true }
-hasp-backend-env = { path = "../hasp-backend-env", optional = true }
-hasp-backend-file = { path = "../hasp-backend-file", optional = true }
-hasp-backend-keyring = { path = "../hasp-backend-keyring", optional = true }
-hasp-backend-op = { path = "../hasp-backend-op", optional = true }
-hasp-backend-vault = { path = "../hasp-backend-vault", optional = true }
-hasp-backend-bw = { path = "../hasp-backend-bw", optional = true }
-hasp-backend-gcp-sm = { path = "../hasp-backend-gcp-sm", optional = true }
-hasp-backend-azure-kv = { path = "../hasp-backend-azure-kv", optional = true }
+hasp-core = { workspace = true }
+hasp-backend-aws-sm = { workspace = true, optional = true }
+hasp-backend-aws-ssm = { workspace = true, optional = true }
+hasp-backend-env = { workspace = true, optional = true }
+hasp-backend-file = { workspace = true, optional = true }
+hasp-backend-keyring = { workspace = true, optional = true }
+hasp-backend-op = { workspace = true, optional = true }
+hasp-backend-vault = { workspace = true, optional = true }
+hasp-backend-bw = { workspace = true, optional = true }
+hasp-backend-gcp-sm = { workspace = true, optional = true }
+hasp-backend-azure-kv = { workspace = true, optional = true }
 url = "2.5"
 
 [dev-dependencies]
 keyring-core = "1.0"
 tempfile = "3"
-hasp-core = { path = "../hasp-core", features = ["test-utils"] }
+hasp-core = { workspace = true, features = ["test-utils"] }
 proptest = { workspace = true }
