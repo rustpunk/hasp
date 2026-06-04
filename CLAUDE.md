@@ -2,15 +2,17 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## Status: 0.1.0-alpha shipped; library API stabilizing toward 0.1.0
+## Status: 0.2.0-alpha (publish-ready); library API stabilizing toward 0.1.0
 
-`hasp 0.1.0-alpha` is on crates.io with all ten backends implementing
+`hasp 0.1.0-alpha` is the placeholder currently on crates.io. The next
+publish is `0.2.0-alpha`, and the workspace is prepped for it (see the
+Publishing section). That release carries the `CHANGELOG.md` train: a
+retry decorator, batch / bulk operations, dry-run diagnostics, SOCKS5
+proxy support, `hasp init`, `hasp cp` (cross-backend copy with hardening),
+the per-invocation hardening-gated cache, and the `hasp-core::hardening`
+process-protection module. All ten backends implement
 `get` / `put` / `list` / `delete` / `exists` (where the backend's
-semantics allow). The Unreleased train documented in `CHANGELOG.md`
-adds a retry decorator, batch / bulk operations, dry-run diagnostics,
-SOCKS5 proxy support, `hasp init`, `hasp cp` (cross-backend copy with
-hardening), and the `hasp-core::hardening` process-protection module.
-The library API is stabilizing before a `0.1.0` release.
+semantics allow). The library API is stabilizing before a `0.1.0` release.
 
 Workspace layout (cargo workspace, edition 2021, MIT OR Apache-2.0):
 - `crates/hasp-core` — `Backend` trait, `Error` taxonomy,
@@ -46,6 +48,23 @@ cargo deny check
 
 `Cargo.lock` is checked in (standard guidance for binary-shipping
 crates). `target/` is git-ignored.
+
+## Publishing
+
+The workspace publishes as **13 crates, not one**. Invariants:
+
+- Internal dependencies carry **both `path` and `version`**, defined once
+  in `[workspace.dependencies]` in the root `Cargo.toml` and referenced per
+  crate as `x = { workspace = true }`. `cargo publish` strips `path` and
+  resolves `version` from the registry, so a `path`-only internal dep fails
+  verification. When bumping, change `workspace.package.version` **and**
+  every internal `version` in `[workspace.dependencies]` together.
+- Publish with `cargo publish --workspace` — it computes the order
+  (`hasp-core` → the ten backends → `hasp` → `hasp-cli`) and waits on the
+  index between tiers. Verify without uploading via
+  `cargo publish --dry-run --workspace`.
+- `hasp` already occupies `0.1.0-alpha` on crates.io (the placeholder); the
+  sibling crate names are first-time publishes.
 
 ## Architecture invariants
 
