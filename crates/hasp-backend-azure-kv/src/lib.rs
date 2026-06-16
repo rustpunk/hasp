@@ -11,15 +11,21 @@
 //!
 //! Supported operations: `get`, `put`, `list`, `delete`, `exists`.
 //!
-//! Authentication is ambient only. `azure_identity::create_credential`
-//! resolves the standard Azure credential chain (service principal env vars,
-//! managed identity, Azure CLI) transparently. No auth-bootstrap flows or
-//! token refresh logic lives in this crate.
+//! Authentication is ambient only. The backend resolves Azure credentials from
+//! service principal environment variables, workload identity, managed identity
+//! environment markers, and developer tools such as Azure CLI. No
+//! auth-bootstrap flows or credential storage logic lives in this crate.
 
+use azure_core::credentials::{Secret, TokenCredential};
+use azure_identity::{
+    ClientSecretCredential, DeveloperToolsCredential, ManagedIdentityCredential,
+    WorkloadIdentityCredential,
+};
 use hasp_core::{
     Backend, BackendFailureKind, Entry, Error, ExposeSecret, ProxyConfig, SecretString,
 };
 use serde::Deserialize;
+use std::sync::Arc;
 use std::time::Duration;
 use url::Url;
 
@@ -138,34 +144,134 @@ impl AzureKvBackend {
         Ok(rt.block_on(future))
     }
 
-    /// Obtain a fresh access token via the Azure identity credential chain.
+    /// Obtain a fresh access token via the ambient Azure credential chain.
     fn token(&self) -> Result<String, Error> {
         self.block_on(async {
-            let credential = azure_identity::create_credential().map_err(|e| {
-                let msg = e.to_string();
-                if msg.to_lowercase().contains("credential") {
-                    Error::AuthenticationFailed(format!(
-                        "no ambient Azure credentials; set AZURE_CLIENT_ID/SECRET/TENANT_ID or log in with Azure CLI: {msg}"
-                    ))
-                } else {
-                    Error::Backend {
-                        scheme: Self::SCHEME,
-                        kind: BackendFailureKind::Permanent,
-                        message: format!("failed to discover Azure credentials: {msg}"),
-                    }
+            let mut errors = Vec::new();
+
+            if let Some(credential) = Self::client_secret_credential(&mut errors) {
+                if let Some(token) =
+                    Self::try_access_token("ClientSecretCredential", credential, &mut errors).await
+                {
+                    return Ok(token);
                 }
-            })?;
+            }
 
-            let access_token = credential
-                .get_token(&[Self::TOKEN_SCOPE])
+            if Self::has_env("AZURE_FEDERATED_TOKEN_FILE") {
+                if let Some(token) = Self::try_access_token(
+                    "WorkloadIdentityCredential",
+                    WorkloadIdentityCredential::new(None),
+                    &mut errors,
+                )
                 .await
-                .map_err(|e| Error::AuthenticationFailed(format!(
-                    "failed to acquire Azure access token: {e}"
-                )))?;
+                {
+                    return Ok(token);
+                }
+            }
 
-            let bearer = access_token.token.secret().to_string();
-            Ok(bearer)
+            if Self::has_managed_identity_env() {
+                if let Some(token) = Self::try_access_token(
+                    "ManagedIdentityCredential",
+                    ManagedIdentityCredential::new(None),
+                    &mut errors,
+                )
+                .await
+                {
+                    return Ok(token);
+                }
+            }
+
+            if let Some(token) = Self::try_access_token(
+                "DeveloperToolsCredential",
+                DeveloperToolsCredential::new(None),
+                &mut errors,
+            )
+            .await
+            {
+                return Ok(token);
+            }
+
+            let detail = if errors.is_empty() {
+                "no credential source was available".to_owned()
+            } else {
+                errors.join("; ")
+            };
+
+            Err(Error::AuthenticationFailed(format!(
+                "no ambient Azure credentials; set AZURE_CLIENT_ID/AZURE_CLIENT_SECRET/AZURE_TENANT_ID, enable managed identity, or log in with Azure CLI: {detail}"
+            )))
         })?
+    }
+
+    fn client_secret_credential(
+        errors: &mut Vec<String>,
+    ) -> Option<azure_core::Result<Arc<ClientSecretCredential>>> {
+        let client_id = Self::env("AZURE_CLIENT_ID");
+        let client_secret = Self::env("AZURE_CLIENT_SECRET");
+        let tenant_id = Self::env("AZURE_TENANT_ID");
+
+        match (client_id, client_secret, tenant_id) {
+            (Some(client_id), Some(client_secret), Some(tenant_id)) => {
+                Some(ClientSecretCredential::new(
+                    &tenant_id,
+                    client_id,
+                    Secret::new(client_secret),
+                    None,
+                ))
+            }
+            (None, None, None) => None,
+            _ => {
+                errors.push(
+                    "ClientSecretCredential: incomplete service principal environment; set AZURE_CLIENT_ID, AZURE_CLIENT_SECRET, and AZURE_TENANT_ID".into(),
+                );
+                None
+            }
+        }
+    }
+
+    async fn try_access_token<C>(
+        label: &str,
+        credential: azure_core::Result<Arc<C>>,
+        errors: &mut Vec<String>,
+    ) -> Option<String>
+    where
+        C: TokenCredential + ?Sized,
+    {
+        let credential = match credential {
+            Ok(credential) => credential,
+            Err(err) => {
+                errors.push(format!("{label}: {err}"));
+                return None;
+            }
+        };
+
+        match credential.get_token(&[Self::TOKEN_SCOPE], None).await {
+            Ok(access_token) => Some(access_token.token.secret().to_owned()),
+            Err(err) => {
+                errors.push(format!("{label}: {err}"));
+                None
+            }
+        }
+    }
+
+    fn env(name: &str) -> Option<String> {
+        std::env::var(name).ok().filter(|value| !value.is_empty())
+    }
+
+    fn has_env(name: &str) -> bool {
+        Self::env(name).is_some()
+    }
+
+    fn has_managed_identity_env() -> bool {
+        [
+            "IDENTITY_ENDPOINT",
+            "IDENTITY_HEADER",
+            "IMDS_ENDPOINT",
+            "MSI_ENDPOINT",
+            "MSI_SECRET",
+        ]
+        .iter()
+        .any(|name| Self::has_env(name))
     }
 
     /// Build a `reqwest::blocking::Client` ready for Azure.

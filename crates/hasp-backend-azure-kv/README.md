@@ -34,12 +34,12 @@ azure-kv://my-vault/prod/db-password?version=2024-01-15
 
 ## Auth Model
 
-Ambient credentials only. `azure_identity::create_credential` resolves the standard
-Azure credential chain:
+Ambient credentials only. The backend resolves Azure credentials from:
 
 - Service principal env vars (`AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`, `AZURE_TENANT_ID`)
-- Managed identity (VM, App Service, AKS, etc.)
-- Azure CLI cached token
+- Workload identity (`AZURE_FEDERATED_TOKEN_FILE`, plus client and tenant env vars)
+- Managed identity when Azure managed-identity environment markers are present
+- Developer tools such as Azure CLI and Azure Developer CLI
 
 No auth-bootstrap, token refresh, or credential storage logic lives in this crate.
 

@@ -30,8 +30,7 @@ Before scaffolding a new feature, check `docs/internal/research/` (11
 RESEARCH-*.md files: keyring grammar, error taxonomy, op caching,
 secrets zeroization, file trim, failure modes, ferrule parity, cp
 threat model) and `notes/` (cli prior-art across 19 tools, perf data,
-threat-model standards). Most early decisions have already been
-ground-truthed there.
+threat-model standards). Before changing areas covered by those notes, read and cite the relevant research note.
 
 ## Build & test
 
@@ -73,7 +72,7 @@ The workspace publishes as **13 crates, not one**. Invariants:
 - **Library is the source of truth; the CLI is a shell.** `clap`, `anyhow`, terminal colors, `process::exit`, and any other CLI-specific dependency must live behind a Cargo feature (e.g., `cli`) or in a separate `src/bin/hasp.rs` that depends only on the public library API. Library consumers must not pay for `clap`. Errors at the library surface are concrete, named types implementing `std::error::Error` — never `anyhow::Error`. The CLI may convert library errors into human strings; the library must not.
 - **URL is the primary identifier.** Schemes: `keyring://`, `aws-sm://`, `aws-ssm://`, `vault://`, `gcp-sm://`, `azure-kv://`, `op://`, `bw://`, `file://`, `env://`. The CLI also accepts `@profile/key` aliases that expand to a URL via user config.
 - **Feature-gated backends.** The default binary stays small and pure-Rust; cloud SDKs and OS-specific keyring code live behind Cargo features. Do not introduce a backend as an unconditional dependency.
-- **Stateless wrt auth.** `hasp` assumes ambient credentials (env vars, IAM role, `~/.vault-token`) or delegates to a backend plugin. Do not add auth-bootstrap flows, token rotation, or credential storage.
+- **Stateless wrt auth.** `hasp` uses ambient credentials (env vars, IAM role, `~/.vault-token`) or delegates to a backend plugin. Do not add auth-bootstrap flows, token rotation, or credential storage.
 - **Out of scope** (do not propose, do not stub): secret rotation, password/key generation, bulk file encryption (defer to `age`/`sops`/`cocoon`), TLS/cert lifecycle.
 
 URL addressing intentionally parallels the sibling crate [`ferrule`](https://github.com/rustpunk/ferrule). When designing the parser, router, or scheme registry, look there first for the existing rustpunk convention before inventing a new one.
@@ -89,9 +88,9 @@ URL addressing intentionally parallels the sibling crate [`ferrule`](https://git
 
 These do not need to be invoked manually; they fire on the relevant triggers. Follow them.
 
-## Secrets-handling posture (anticipatory)
+## Secrets-handling posture
 
-Once code lands, treat every secret value as untrusted-output-grade:
+Treat every secret value as untrusted-output-grade:
 
 - Never log secret values, even at `trace`. Log the URL/key, never the bytes.
 - Wrap fetched secrets in a redacting type (`secrecy::SecretString` or equivalent) at the backend boundary. Redacted types are part of the public library API — downstream consumers must inherit the redaction posture, not reconstruct it.
