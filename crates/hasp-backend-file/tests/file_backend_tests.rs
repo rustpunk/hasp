@@ -16,6 +16,104 @@ fn get_existing_file_returns_contents() {
 }
 
 #[test]
+fn get_into_matches_get_default_trim() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("trimmed.txt");
+    std::fs::write(&path, "trimmed-secret\n").unwrap();
+
+    let backend = FileBackend;
+    let url = Url::from_file_path(&path).unwrap();
+
+    let mut slot = SecretString::new(String::new().into_boxed_str());
+    backend.get_into(&url, &mut slot).unwrap();
+    let getter = backend.get(&url).unwrap();
+    assert_eq!(slot.expose_secret(), getter.expose_secret());
+    assert_eq!(slot.expose_secret(), "trimmed-secret");
+}
+
+#[test]
+fn get_into_matches_get_raw() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("raw.txt");
+    std::fs::write(&path, "raw-secret\n").unwrap();
+
+    let backend = FileBackend;
+    let mut url = Url::from_file_path(&path).unwrap();
+    url.query_pairs_mut().append_pair("raw", "true");
+
+    let mut slot = SecretString::new(String::new().into_boxed_str());
+    backend.get_into(&url, &mut slot).unwrap();
+    assert_eq!(slot.expose_secret(), "raw-secret\n");
+}
+
+#[test]
+fn get_into_raw_length_matches_payload() {
+    // The "no realloc" property of the sized-read helper is verified
+    // by inspection (try_reserve_exact + read_to_string + capacity-
+    // equal-length into_boxed_str). At the test level we can only
+    // assert the observable: with `?raw=true`, get_into returns
+    // bytes whose length matches the source file exactly — no
+    // trim, no truncation, no padding. A regression that switches
+    // to an unsized read or accidentally trims the raw path would
+    // fail here.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("exact.txt");
+    let payload = "exact-fit-bytes";
+    std::fs::write(&path, payload).unwrap();
+
+    let backend = FileBackend;
+    let mut url = Url::from_file_path(&path).unwrap();
+    url.query_pairs_mut().append_pair("raw", "true");
+
+    let mut slot = SecretString::new(String::new().into_boxed_str());
+    backend.get_into(&url, &mut slot).unwrap();
+    assert_eq!(slot.expose_secret().len(), payload.len());
+    assert_eq!(slot.expose_secret(), payload);
+}
+
+#[test]
+fn get_into_default_is_get_for_other_backends() {
+    // The trait default forwards to `get`. Exercise it via a tiny
+    // shim backend whose `get` is the only thing implemented, to
+    // prove the contract.
+    struct ConstBackend(&'static str);
+    impl Backend for ConstBackend {
+        fn scheme(&self) -> &'static str {
+            "const"
+        }
+        fn get(&self, _: &Url) -> Result<SecretString, hasp_core::Error> {
+            Ok(SecretString::new(self.0.into()))
+        }
+        fn put(&self, _: &Url, _: &SecretString) -> Result<(), hasp_core::Error> {
+            Err(hasp_core::Error::UnsupportedOperation {
+                scheme: "const",
+                operation: "put",
+            })
+        }
+        fn list(&self, _: &Url) -> Result<Vec<hasp_core::Entry>, hasp_core::Error> {
+            Err(hasp_core::Error::UnsupportedOperation {
+                scheme: "const",
+                operation: "list",
+            })
+        }
+        fn delete(&self, _: &Url) -> Result<(), hasp_core::Error> {
+            Err(hasp_core::Error::UnsupportedOperation {
+                scheme: "const",
+                operation: "delete",
+            })
+        }
+        fn exists(&self, _: &Url) -> Result<bool, hasp_core::Error> {
+            Ok(true)
+        }
+    }
+    let backend = ConstBackend("default-impl-secret");
+    let url = Url::parse("const://anything").unwrap();
+    let mut slot = SecretString::new(String::new().into_boxed_str());
+    backend.get_into(&url, &mut slot).unwrap();
+    assert_eq!(slot.expose_secret(), "default-impl-secret");
+}
+
+#[test]
 fn get_missing_file_returns_not_found() {
     let backend = FileBackend;
     let url = Url::parse("file:///nonexistent/path/to/secret.txt").unwrap();

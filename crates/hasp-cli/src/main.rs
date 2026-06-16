@@ -211,13 +211,21 @@ enum Command {
 enum CacheAction {
     /// Drop every cached entry.
     ///
-    /// Today the cache is in-process: clearing it has effect only
-    /// within the current invocation (which exits right after this
-    /// command, so the gesture is a no-op against future invocations).
-    /// When the `cache-persistent` feature is enabled and the
-    /// on-disk cache implementation lands, this also removes the
-    /// encrypted cache file and the OS-keyring entry holding its key.
-    Clear,
+    /// In-process entries are invalidated unconditionally. When the
+    /// `cache-persistent` feature is built in, the on-disk encrypted
+    /// file at `$XDG_CACHE_HOME/hasp/cache.bin` is also removed. The
+    /// OS-keyring entry holding the symmetric key is preserved unless
+    /// `--forget-key` is set, so subsequent saves reuse the same key
+    /// and historical ciphertext on backup tapes remains decryptable.
+    Clear {
+        /// Also remove the OS-keyring entry holding the symmetric
+        /// key. Use when the user wants the on-disk cache to be
+        /// undecryptable post-clear (pre-archive cleanup, threat
+        /// response). Implies the encrypted file is regenerated with
+        /// a fresh key on next save.
+        #[arg(long)]
+        forget_key: bool,
+    },
 }
 
 /// Sub-actions for `hasp profile`.
@@ -339,7 +347,8 @@ fn run(cli: Cli, hardening_token: hasp::HardeningToken) -> Result<(), (i32, Stri
         .proxy(proxy)
         .with_audit_sink(audit_sink.clone())
         .with_cache_policy(cache_policy, hardening_token)
-        .build();
+        .try_build()
+        .map_err(precondition_err_from_hasp)?;
 
     // `cp` and `diff` handle `--explain` in their own arms because
     // both have two addresses to resolve. Every other verb's dry-run
@@ -359,6 +368,15 @@ fn run(cli: Cli, hardening_token: hasp::HardeningToken) -> Result<(), (i32, Stri
             return Ok(());
         }
     }
+
+    // `cache clear` is the one verb that must NOT trigger an
+    // exit-path save: the user just asked us to remove the on-disk
+    // file (and optionally drop the keyring entry), so re-writing it
+    // moments later would silently undo the clear. Every other verb
+    // — including unrelated commands like `Man` and `Complete` —
+    // exits with `save_cache` invoked; it no-ops outside Persistent
+    // mode, so the only behavioral surprise is on the clear path.
+    let suppress_save = matches!(cli.command, Command::Cache { .. });
 
     match cli.command {
         Command::Get { address, field } => {
@@ -409,7 +427,11 @@ fn run(cli: Cli, hardening_token: hasp::HardeningToken) -> Result<(), (i32, Stri
             // mapping (auth=5, transport=4, etc.) so callers can still
             // distinguish "key missing" from "could not check".
             let exists = store.exists(&url).map_err(cli_error)?;
-            std::process::exit(if exists { EXIT_SUCCESS } else { EXIT_USAGE });
+            exit_after_save(
+                &store,
+                cli.quiet,
+                if exists { EXIT_SUCCESS } else { EXIT_USAGE },
+            );
         }
         Command::Cp {
             src,
@@ -529,10 +551,11 @@ fn run(cli: Cli, hardening_token: hasp::HardeningToken) -> Result<(), (i32, Stri
                 eprintln!("hasp: diff {a} vs {b} -> {outcome:?}");
             }
             // 0 = match, 1 = differ. Parallels `hasp exists`.
-            std::process::exit(match outcome {
+            let code = match outcome {
                 hasp::DiffOutcome::Match => EXIT_SUCCESS,
                 hasp::DiffOutcome::Differ => EXIT_USAGE,
-            });
+            };
+            exit_after_save(&store, cli.quiet, code);
         }
         Command::Run {
             env,
@@ -549,7 +572,7 @@ fn run(cli: Cli, hardening_token: hasp::HardeningToken) -> Result<(), (i32, Stri
                 cli.quiet,
                 cli.verbose,
             )?;
-            std::process::exit(exit);
+            exit_after_save(&store, cli.quiet, exit);
         }
         Command::Profile { action } => {
             let profiles_path = profile_allow::profiles_toml_path()
@@ -575,9 +598,9 @@ fn run(cli: Cli, hardening_token: hasp::HardeningToken) -> Result<(), (i32, Stri
             config_init::init(force).map_err(usage_err)?;
         }
         Command::Cache { action } => match action {
-            CacheAction::Clear => {
+            CacheAction::Clear { forget_key } => {
                 let had_cache = store.has_cache();
-                store.clear_cache();
+                store.clear_cache_with(forget_key);
                 if !cli.quiet {
                     if had_cache {
                         eprintln!("hasp cache cleared.");
@@ -602,6 +625,19 @@ fn run(cli: Cli, hardening_token: hasp::HardeningToken) -> Result<(), (i32, Stri
                 io::stdout()
                     .write_all(&buf)
                     .map_err(|e| usage_err(format!("failed to write man page: {e}")))?;
+            }
+        }
+    }
+
+    // Persist the cache snapshot on the success path. No-op unless
+    // the cache is in Persistent mode. Errors here are non-fatal —
+    // the verbs already succeeded; reporting a save-time failure
+    // through the same channel would be confusing. Skipped for
+    // `cache clear` to keep `--forget-key` honest.
+    if !suppress_save {
+        if let Err(e) = store.save_cache() {
+            if !cli.quiet {
+                eprintln!("hasp: cache save failed: {e}");
             }
         }
     }
@@ -806,14 +842,34 @@ fn resolve_cache_policy(cli: &Cli) -> hasp::CachePolicy {
         .and_then(|v| v.trim().parse::<u64>().ok())
     {
         Some(0) => hasp::CachePolicy::Disabled,
-        Some(secs) => {
-            let clamped = secs.min(3600);
-            hasp::CachePolicy::Process {
-                ttl: std::time::Duration::from_secs(clamped),
-                capacity: 1024,
-            }
-        }
+        Some(secs) => persistent_or_process(std::time::Duration::from_secs(secs.min(3600))),
         None => hasp::CachePolicy::process_default(),
+    }
+}
+
+/// When the `cache-persistent` feature is built in, an explicit
+/// `HASP_CACHE_TTL=<seconds>` is treated as a request for cross-
+/// invocation persistence: the value is stored encrypted at
+/// `$XDG_CACHE_HOME/hasp/cache.bin`, keyed by an OS-keyring-bound
+/// symmetric key. When the feature is not built, hasp degrades to the
+/// per-invocation in-process cache silently — the same shape the
+/// scaffold has shipped under since #8.
+#[cfg(feature = "cache-persistent")]
+fn persistent_or_process(ttl: std::time::Duration) -> hasp::CachePolicy {
+    match hasp::PersistentPolicy::defaults() {
+        Some(p) => hasp::CachePolicy::Persistent(p.with_ttl(ttl)),
+        None => hasp::CachePolicy::Process {
+            ttl,
+            capacity: 1024,
+        },
+    }
+}
+
+#[cfg(not(feature = "cache-persistent"))]
+fn persistent_or_process(ttl: std::time::Duration) -> hasp::CachePolicy {
+    hasp::CachePolicy::Process {
+        ttl,
+        capacity: 1024,
     }
 }
 
@@ -922,6 +978,32 @@ pub(crate) fn usage_err(message: String) -> (i32, String) {
 /// for this operation are not met."
 pub(crate) fn precondition_err(message: String) -> (i32, String) {
     (EXIT_PRECONDITION, message)
+}
+
+/// Wrap a library-side `hasp::Error` (e.g., persistent-cache keyring
+/// failure surfaced through `StoreBuilder::try_build`) into the
+/// `(code, message)` tuple `run` propagates. Reuses the existing
+/// taxonomy mapping so `PermissionDenied` surfaces as exit code 3.
+/// Save the persistent cache before exiting with `code`. Used by
+/// verbs that need to set a non-zero exit code based on a
+/// non-error outcome (`exists`, `diff`, `run`) — those paths
+/// previously bypassed the trailing `store.save_cache()` because
+/// `process::exit` short-circuits the `run` function. Save-time
+/// failures are surfaced to stderr (unless `--quiet`) but never
+/// alter the chosen exit code, mirroring the normal-exit path.
+fn exit_after_save(store: &hasp::Store, quiet: bool, code: i32) -> ! {
+    if let Err(e) = store.save_cache() {
+        if !quiet {
+            eprintln!("hasp: cache save failed: {e}");
+        }
+    }
+    std::process::exit(code);
+}
+
+pub(crate) fn precondition_err_from_hasp(err: hasp::Error) -> (i32, String) {
+    let code = exit_code(&err);
+    let message = fmt_error(err);
+    (code, message)
 }
 
 /// Append `?field=<path>` (URL-encoded) to an address.

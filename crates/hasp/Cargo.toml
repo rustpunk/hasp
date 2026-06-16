@@ -26,6 +26,9 @@ aws-sm = ["dep:hasp-backend-aws-sm"]
 aws-ssm = ["dep:hasp-backend-aws-ssm"]
 gcp-sm = ["dep:hasp-backend-gcp-sm"]
 azure-kv = ["dep:hasp-backend-azure-kv"]
+# Forward the encrypted-file persistent-cache wiring to hasp-core.
+# Off by default — see hasp-core/Cargo.toml for the threat-model note.
+cache-persistent = ["hasp-core/cache-persistent"]
 
 [dependencies]
 hasp-core = { workspace = true }

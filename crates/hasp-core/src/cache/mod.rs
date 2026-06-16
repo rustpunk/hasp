@@ -28,15 +28,22 @@
 //! `RESEARCH-op-caching.md`) lives behind the `cache-persistent`
 //! Cargo feature and is opt-in by binary builders only.
 
-use std::sync::Arc;
-use std::time::Duration;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime};
 
 use moka::notification::RemovalCause;
 use moka::sync::Cache;
 
 use crate::audit::{AuditEvent, AuditSink, CacheEvent};
 use crate::hardening::HardeningToken;
+use crate::Error;
 use crate::SecretString;
+
+#[cfg(feature = "cache-persistent")]
+pub mod persistent;
+#[cfg(feature = "cache-persistent")]
+pub use persistent::{DecryptedEntry, LoadOutcome, PersistentStore};
 
 /// Cache key. `scheme` is the URL scheme and is intentionally
 /// scheme-namespaced so the same URL string handled by two different
@@ -56,19 +63,19 @@ impl CacheKey {
     }
 }
 
-/// Per-invocation in-process cache policy.
+/// Cache policy selector for [`ProcessCache::new`].
 ///
 /// `Disabled` is the safe default and skips every cache code path.
 /// `Process` enables in-process memoization with the given TTL and
 /// capacity ceiling; capacity-eviction is LRU within moka's segmented
 /// design.
 ///
-/// `Persistent` (gated on the `cache-persistent` Cargo feature) is
-/// reserved for a future cross-invocation encrypted-file path.
-/// Constructing it via [`ProcessCache::new`] currently downgrades to
-/// the in-process `Process` policy with the persistent's TTL and
-/// capacity — the on-disk encrypted-file implementation is not yet
-/// in tree.
+/// `Persistent` (gated on the `cache-persistent` Cargo feature) wires
+/// an encrypted on-disk envelope keyed by an OS-keyring-bound 32-byte
+/// symmetric key. Load happens on construction; save on
+/// [`crate::cache::ProcessCache::save_to_disk`]. Threat model and
+/// fail-closed contract live on [`PersistentPolicy`] and
+/// [`persistent::PersistentStore`].
 #[derive(Debug, Clone, Default)]
 pub enum CachePolicy {
     #[default]
@@ -81,26 +88,32 @@ pub enum CachePolicy {
     Persistent(PersistentPolicy),
 }
 
-/// Persistent cache configuration (scaffold only).
+/// Configuration for the encrypted on-disk cache.
 ///
 /// `ttl` is the per-entry time-to-live, clamped against AWS Secrets
-/// Manager Agent's published envelope (300s default, 3600s max, 0
-/// disables persistence).
+/// Manager Agent's published envelope (300s default, 3600s max). A
+/// `ttl` of zero disables persistence at the policy layer; the
+/// caller should select `CachePolicy::Disabled` instead.
 ///
-/// `path` is the intended encrypted cache file location. Default:
-/// `$XDG_CACHE_HOME/hasp/cache.bin`. File mode `0o600` on Unix when
-/// the implementation lands.
+/// `path` is the encrypted cache file location. Default:
+/// `$XDG_CACHE_HOME/hasp/cache.bin`, mode `0o600` on Unix, atomically
+/// replaced on save via tempfile + rename.
 ///
 /// `keyring_service` and `keyring_account` identify the OS-keyring
-/// entry holding the per-host symmetric key (XChaCha20-Poly1305).
-/// Default service is `"hasp"`; default account is
-/// `"cache:{user}@{hostname}"`.
+/// entry holding the per-host XChaCha20-Poly1305 symmetric key.
+/// Default service is `"hasp"`; default account is `"cache:<user>"`.
+/// The first `keyring_core::Entry::get_secret()` doubles as the
+/// headless-container probe — when the keyring is unreachable,
+/// `ProcessCache::new` surfaces `Error::PermissionDenied`, no
+/// co-located-key fallback (RustCrypto AEADs + RFC 8439 / XChaCha20
+/// extension).
 ///
-/// The struct currently pins the design in code; constructing it and
-/// passing to [`ProcessCache::new`] is safe but downgrades to the
-/// in-process `Process` policy with the persistent's TTL and
-/// capacity. The on-disk encrypted-file implementation is not yet
-/// in tree.
+/// AWS Secrets Manager Agent's threat-model warning applies verbatim:
+/// *"After the secret value is pulled into the cache, any user with
+/// access to the compute environment can access the secret from the
+/// cache."* The OS-keyring binding defends against trivial filesystem
+/// grep and backup-snapshot exfil — not against same-uid code
+/// execution.
 #[cfg(feature = "cache-persistent")]
 #[derive(Debug, Clone)]
 pub struct PersistentPolicy {
@@ -177,11 +190,25 @@ impl CachePolicy {
 #[derive(Clone)]
 pub struct ProcessCache {
     inner: Cache<CacheKey, Arc<SecretString>>,
+    #[cfg(feature = "cache-persistent")]
+    ttl: Duration,
+    /// Per-entry insertion timestamps. moka does not expose
+    /// `inserted_at` from its iter API, so the cache tracks it here
+    /// for the `save_to_disk` snapshot — every saved entry's
+    /// `expires_at` is `inserted_at + ttl`, not `now + ttl`. Without
+    /// this, a daemon that calls `save_to_disk` repeatedly would
+    /// extend every entry's effective TTL on each save (an AWS-Agent
+    /// envelope violation for long-running library consumers).
+    inserted_at: Arc<Mutex<HashMap<CacheKey, SystemTime>>>,
+    #[cfg(feature = "cache-persistent")]
+    persistent: Option<Arc<PersistentStore>>,
+    #[cfg(feature = "cache-persistent")]
+    audit_sink: Option<Arc<dyn AuditSink>>,
 }
 
 impl ProcessCache {
-    /// Construct a cache governed by `policy`. Returns `None` when the
-    /// policy is `Disabled`.
+    /// Construct a cache governed by `policy`. Returns `Ok(None)` when
+    /// the policy is `Disabled`.
     ///
     /// The `_token` parameter is the architectural lever: callers who
     /// have not installed hardening cannot obtain a token and
@@ -189,51 +216,131 @@ impl ProcessCache {
     /// value (it is `Copy`) and is not retained.
     ///
     /// `audit_sink`, when provided, receives `cache.expire` events on
-    /// TTL-driven evictions. Explicit `invalidate` / `invalidate_all`
-    /// calls do not emit events here — `Store` emits its own
-    /// `cache.clear` on the user-facing path.
+    /// TTL-driven evictions, plus `cache.load` / `cache.tamper_rejected`
+    /// for the persistent flavor. Explicit `invalidate` /
+    /// `invalidate_all` calls do not emit events here — `Store` emits
+    /// its own `cache.clear` on the user-facing path.
+    ///
+    /// `Persistent` (gated on `cache-persistent`) loads any existing
+    /// encrypted file at construction time. A missing file or AEAD
+    /// tamper is treated as a cold cache (no error); only an
+    /// unreachable OS keyring surfaces as `Err(PermissionDenied)` —
+    /// the fail-closed contract.
     pub fn new(
         policy: &CachePolicy,
         _token: HardeningToken,
         audit_sink: Option<Arc<dyn AuditSink>>,
-    ) -> Option<Self> {
+    ) -> Result<Option<Self>, Error> {
         match policy {
             #[cfg(feature = "cache-persistent")]
-            CachePolicy::Persistent(p) => {
-                // Scaffold downgrade: with the on-disk encrypted-file path
-                // not yet implemented, `Persistent` runs as an in-process
-                // `Process` policy carrying the persistent's TTL and
-                // capacity. CLI integration (`HASP_CACHE_TTL`,
-                // `hasp cache clear`) operates against the in-memory
-                // layer without a behavioral surprise.
-                let process = CachePolicy::Process {
-                    ttl: p.ttl,
-                    capacity: p.capacity,
-                };
-                Self::new(&process, _token, audit_sink)
+            CachePolicy::Persistent(p) => Self::build_persistent(p, _token, audit_sink),
+            CachePolicy::Disabled => Ok(None),
+            CachePolicy::Process { ttl, capacity } => Ok(Some(Self::build_process(
+                *ttl,
+                *capacity,
+                audit_sink,
+                #[cfg(feature = "cache-persistent")]
+                None,
+            ))),
+        }
+    }
+
+    fn build_process(
+        ttl: Duration,
+        capacity: u64,
+        audit_sink: Option<Arc<dyn AuditSink>>,
+        #[cfg(feature = "cache-persistent")] persistent: Option<Arc<PersistentStore>>,
+    ) -> Self {
+        let sink = audit_sink.clone();
+        let inserted_at: Arc<Mutex<HashMap<CacheKey, SystemTime>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let inserted_at_listener = inserted_at.clone();
+        let inner = Cache::builder()
+            .max_capacity(capacity)
+            .time_to_live(ttl)
+            .eviction_listener(move |k: Arc<CacheKey>, v, cause| {
+                // Drop the Arc<SecretString> first so the inner
+                // zeroize fires promptly. moka 0.12 sync flavor
+                // runs this listener synchronously on the
+                // eviction-causing thread.
+                drop(v);
+                if let Ok(mut m) = inserted_at_listener.lock() {
+                    m.remove(&*k);
+                }
+                if matches!(cause, RemovalCause::Expired) {
+                    if let Some(s) = &sink {
+                        s.emit(&AuditEvent::cache(CacheEvent::Expire, k.scheme));
+                    }
+                }
+            })
+            .build();
+        Self {
+            inner,
+            #[cfg(feature = "cache-persistent")]
+            ttl,
+            inserted_at,
+            #[cfg(feature = "cache-persistent")]
+            persistent,
+            #[cfg(feature = "cache-persistent")]
+            audit_sink,
+        }
+    }
+
+    #[cfg(feature = "cache-persistent")]
+    fn build_persistent(
+        p: &PersistentPolicy,
+        _token: HardeningToken,
+        audit_sink: Option<Arc<dyn AuditSink>>,
+    ) -> Result<Option<Self>, Error> {
+        let store = Arc::new(PersistentStore::new(
+            p.path.clone(),
+            p.keyring_service.clone(),
+            p.keyring_account.clone(),
+        ));
+        let cache = Self::build_process(p.ttl, p.capacity, audit_sink.clone(), Some(store.clone()));
+        let outcome = match store.load() {
+            Ok(o) => o,
+            Err(e) if matches!(e, Error::PermissionDenied(_)) => {
+                // Fail-closed: cannot reach the OS keyring.
+                return Err(e);
             }
-            CachePolicy::Disabled => None,
-            CachePolicy::Process { ttl, capacity } => {
-                let sink = audit_sink.clone();
-                let inner = Cache::builder()
-                    .max_capacity(*capacity)
-                    .time_to_live(*ttl)
-                    .eviction_listener(move |k: Arc<CacheKey>, v, cause| {
-                        // Drop the Arc<SecretString> first so the inner
-                        // zeroize fires promptly. moka 0.12 sync flavor
-                        // runs this listener synchronously on the
-                        // eviction-causing thread.
-                        drop(v);
-                        if matches!(cause, RemovalCause::Expired) {
-                            if let Some(s) = &sink {
-                                s.emit(&AuditEvent::cache(CacheEvent::Expire, k.scheme));
-                            }
-                        }
-                    })
-                    .build();
-                Some(Self { inner })
+            Err(_e) => {
+                // I/O failure on the cache file itself (read error after
+                // it existed and was readable enough to be opened, then
+                // something went sideways). Treat as a cold cache so the
+                // user's flow continues, but DO NOT emit
+                // `cache.tamper_rejected` — that label is reserved for
+                // AEAD-tag mismatches surfaced through the LoadOutcome
+                // path, where the threat-model signal is "hostile
+                // bit-flip" rather than "transient I/O".
+                persistent::LoadOutcome {
+                    entries: Vec::new(),
+                    tampered: false,
+                }
+            }
+        };
+        if outcome.tampered {
+            if let Some(sink) = &audit_sink {
+                sink.emit(&AuditEvent::cache(CacheEvent::TamperRejected, "all"));
             }
         }
+        // Re-hydrate insertion timestamps from disk so a subsequent
+        // `save_to_disk` preserves the original entry's expiry
+        // envelope instead of resetting it. `inserted = expires_at -
+        // ttl` reverses the formula used at save time.
+        if let Ok(mut m) = cache.inserted_at.lock() {
+            for e in &outcome.entries {
+                let inserted = e.expires_at.checked_sub(p.ttl).unwrap_or(e.expires_at);
+                m.insert(e.key.clone(), inserted);
+            }
+        }
+        for e in outcome.entries {
+            cache.inner.insert(e.key, e.value);
+        }
+        if let Some(sink) = &audit_sink {
+            sink.emit(&AuditEvent::cache(CacheEvent::Load, "all"));
+        }
+        Ok(Some(cache))
     }
 
     /// Read a cached value. Returns the `Arc<SecretString>` if a
@@ -243,18 +350,31 @@ impl ProcessCache {
         self.inner.get(key)
     }
 
-    /// Insert or replace a value.
+    /// Insert or replace a value. Also stamps the entry with the
+    /// current insertion time so that `save_to_disk` can emit a
+    /// per-entry `expires_at` instead of pinning every saved entry
+    /// to `now + ttl`. On a replace, the timestamp resets — the
+    /// entry behaves as fresh.
     pub fn insert(&self, key: CacheKey, value: Arc<SecretString>) {
+        if let Ok(mut m) = self.inserted_at.lock() {
+            m.insert(key.clone(), SystemTime::now());
+        }
         self.inner.insert(key, value);
     }
 
     /// Invalidate a single entry. No-op if the key is absent.
     pub fn invalidate(&self, key: &CacheKey) {
+        if let Ok(mut m) = self.inserted_at.lock() {
+            m.remove(key);
+        }
         self.inner.invalidate(key);
     }
 
     /// Drop every entry. Used by `hasp cache clear` and tests.
     pub fn invalidate_all(&self) {
+        if let Ok(mut m) = self.inserted_at.lock() {
+            m.clear();
+        }
         self.inner.invalidate_all();
     }
 
@@ -270,6 +390,87 @@ impl ProcessCache {
     /// under concurrent insertion.
     pub fn entry_count(&self) -> u64 {
         self.inner.entry_count()
+    }
+
+    /// Persist the cache snapshot to disk. No-op when the cache was
+    /// constructed without a `Persistent` policy. Emits `cache.save`
+    /// on success; errors surface to the caller.
+    ///
+    /// Each saved entry's `expires_at` is `inserted_at + ttl`, drawn
+    /// from the cache's per-entry insertion-time map (populated on
+    /// `insert`, cleared on eviction). Entries whose computed
+    /// `expires_at` is already in the past at save time are dropped
+    /// before write — the on-disk envelope never carries already-
+    /// expired entries, and repeated saves do not extend the
+    /// effective TTL. A daemon that calls `save_to_disk` every
+    /// second sees the same per-secret expiry envelope as one save
+    /// per `ttl`.
+    #[cfg(feature = "cache-persistent")]
+    pub fn save_to_disk(&self) -> Result<(), Error> {
+        let Some(store) = &self.persistent else {
+            return Ok(());
+        };
+        self.inner.run_pending_tasks();
+        let now = SystemTime::now();
+        // Clone the insertion-time map under the lock, then release
+        // it before iterating the cache. moka's iter could re-enter
+        // the eviction listener (which also takes the lock) on a
+        // racing expiry, so holding the lock across iter would
+        // deadlock.
+        let inserted_at_snapshot: HashMap<CacheKey, SystemTime> = self
+            .inserted_at
+            .lock()
+            .map(|m| m.clone())
+            .unwrap_or_default();
+        let mut snapshot: Vec<DecryptedEntry> =
+            Vec::with_capacity(self.inner.entry_count() as usize);
+        for entry in self.inner.iter() {
+            let (k, v) = entry;
+            let key = (*k).clone();
+            let inserted = inserted_at_snapshot.get(&key).copied().unwrap_or(now);
+            let expires_at = inserted + self.ttl;
+            if expires_at <= now {
+                continue;
+            }
+            snapshot.push(DecryptedEntry {
+                key,
+                value: v,
+                expires_at,
+            });
+        }
+        store.save(&snapshot)?;
+        if let Some(sink) = &self.audit_sink {
+            sink.emit(&AuditEvent::cache(CacheEvent::Save, "all"));
+        }
+        Ok(())
+    }
+
+    /// Remove the on-disk encrypted cache file (when persistent). The
+    /// keyring entry is preserved unless `forget_key` is also true.
+    /// In-memory entries are not touched by this method; callers that
+    /// want a full wipe should call [`Self::invalidate_all`] first.
+    #[cfg(feature = "cache-persistent")]
+    pub fn clear_persistent_file(&self, forget_key: bool) -> Result<(), Error> {
+        let Some(store) = &self.persistent else {
+            return Ok(());
+        };
+        store.delete_file()?;
+        if forget_key {
+            store.forget_key()?;
+        }
+        Ok(())
+    }
+
+    /// Whether this cache writes to disk on `save_to_disk`.
+    pub fn is_persistent(&self) -> bool {
+        #[cfg(feature = "cache-persistent")]
+        {
+            self.persistent.is_some()
+        }
+        #[cfg(not(feature = "cache-persistent"))]
+        {
+            false
+        }
     }
 }
 
@@ -299,18 +500,20 @@ mod tests {
     #[test]
     fn disabled_policy_returns_none() {
         let policy = CachePolicy::Disabled;
-        assert!(ProcessCache::new(&policy, token(), None).is_none());
+        assert!(ProcessCache::new(&policy, token(), None).unwrap().is_none());
     }
 
     #[test]
     fn process_policy_returns_some() {
         let policy = CachePolicy::process_default();
-        assert!(ProcessCache::new(&policy, token(), None).is_some());
+        assert!(ProcessCache::new(&policy, token(), None).unwrap().is_some());
     }
 
     #[test]
     fn insert_then_get_returns_same_secret_bytes() {
-        let cache = ProcessCache::new(&CachePolicy::process_default(), token(), None).unwrap();
+        let cache = ProcessCache::new(&CachePolicy::process_default(), token(), None)
+            .unwrap()
+            .unwrap();
         let key = CacheKey::new("env", "USER");
         let secret = Arc::new(SecretString::new("alice".to_string().into()));
         cache.insert(key.clone(), secret.clone());
@@ -321,7 +524,9 @@ mod tests {
 
     #[test]
     fn invalidate_removes_entry() {
-        let cache = ProcessCache::new(&CachePolicy::process_default(), token(), None).unwrap();
+        let cache = ProcessCache::new(&CachePolicy::process_default(), token(), None)
+            .unwrap()
+            .unwrap();
         let key = CacheKey::new("env", "USER");
         cache.insert(
             key.clone(),
@@ -338,7 +543,7 @@ mod tests {
             ttl: Duration::from_millis(50),
             capacity: 16,
         };
-        let cache = ProcessCache::new(&policy, token(), None).unwrap();
+        let cache = ProcessCache::new(&policy, token(), None).unwrap().unwrap();
         let key = CacheKey::new("env", "USER");
         cache.insert(
             key.clone(),
@@ -376,7 +581,9 @@ mod tests {
             ttl: Duration::from_millis(50),
             capacity: 16,
         };
-        let cache = ProcessCache::new(&policy, token(), Some(sink.clone())).unwrap();
+        let cache = ProcessCache::new(&policy, token(), Some(sink.clone()))
+            .unwrap()
+            .unwrap();
         let key = CacheKey::new("env", "EXPIRE_TEST");
         cache.insert(
             key.clone(),
@@ -402,7 +609,7 @@ mod tests {
             ttl: Duration::from_secs(60),
             capacity: 2,
         };
-        let cache = ProcessCache::new(&policy, token(), None).unwrap();
+        let cache = ProcessCache::new(&policy, token(), None).unwrap().unwrap();
         cache.insert(
             CacheKey::new("env", "A"),
             Arc::new(SecretString::new("a".to_string().into())),
@@ -424,7 +631,9 @@ mod tests {
 
     #[test]
     fn scheme_namespacing_prevents_cross_backend_alias() {
-        let cache = ProcessCache::new(&CachePolicy::process_default(), token(), None).unwrap();
+        let cache = ProcessCache::new(&CachePolicy::process_default(), token(), None)
+            .unwrap()
+            .unwrap();
         let k1 = CacheKey::new("env", "DUP");
         let k2 = CacheKey::new("file", "DUP");
         cache.insert(

@@ -126,12 +126,30 @@ if [ "$1" = "item" ] && [ "$2" = "list" ]; then
     fi
 fi
 
-if [ "$1" = "item" ] && [ "$2" = "edit" ]; then
+if [ "$1" = "item" ] && [ "$2" = "get" ]; then
     item="$3"
-    # $4 is --vault, $5 is vault name, $6+ are field=value assignments.
     vault="$5"
     if [ "$vault" = "test-vault" ] && [ "$item" = "test-item" ]; then
-        # Edit succeeds for any field assignment on existing items.
+        printf '%s' '{"id":"uuid-test-item","title":"test-item","category":"PASSWORD","vault":{"id":"v","name":"test-vault"},"fields":[{"id":"password","label":"password","type":"CONCEALED","purpose":"PASSWORD","value":"old-password"},{"id":"field1","label":"field1","type":"CONCEALED","purpose":"","value":"old-field1"}]}'
+        exit 0
+    fi
+    echo "could not find item" >&2
+    exit 1
+fi
+
+if [ "$1" = "item" ] && [ "$2" = "edit" ]; then
+    item="$3"
+    # `op item edit <item> --vault <vault> -`. The final `-` reads the
+    # JSON template from stdin. Anything else on argv after the vault
+    # would be a regression to the old field=value assignment path.
+    if [ "$6" != "-" ]; then
+        echo "fake op: edit must use stdin variant ('-' final positional, got $6)" >&2
+        exit 1
+    fi
+    # Drain stdin so the parent doesn't block on EPIPE.
+    cat >/dev/null
+    vault="$5"
+    if [ "$vault" = "test-vault" ] && [ "$item" = "test-item" ]; then
         exit 0
     fi
     echo "could not find item" >&2
@@ -139,8 +157,18 @@ if [ "$1" = "item" ] && [ "$2" = "edit" ]; then
 fi
 
 if [ "$1" = "item" ] && [ "$2" = "create" ]; then
-    # `op item create --vault <vault> --title <item> --category password <field>=<value>`
-    # We don't validate the full arg shape — just succeed for known vaults.
+    # `op item create --vault <vault> --title <item> --category password -`.
+    # The final positional must be `-`. Drain stdin and succeed for
+    # known vaults. POSIX sh has no `${!#}`; iterate to the last arg.
+    last=""
+    for a in "$@"; do
+        last="$a"
+    done
+    if [ "$last" != "-" ]; then
+        echo "fake op: create must use stdin variant ('-' final positional, got $last)" >&2
+        exit 1
+    fi
+    cat >/dev/null
     for arg in "$@"; do
         case "$arg" in
             test-vault) exit 0 ;;
@@ -245,9 +273,9 @@ done
 if [ "$1" = "get" ] && [ "$2" = "item" ]; then
     name="$3"
     case "$name" in
-        test-item)
+        test-item|uuid-test-item)
             cat <<'JSON'
-{"success":true,"data":{"name":"test-item","login":{"username":"testuser","password":"testpass"},"notes":"canned notes","fields":[{"name":"custom","value":"custom-field"}]}}
+{"success":true,"data":{"id":"uuid-test-item","name":"test-item","type":1,"login":{"username":"testuser","password":"testpass"},"notes":"canned notes","fields":[{"name":"custom","value":"custom-field"}]}}
 JSON
             exit 0
             ;;
@@ -259,6 +287,74 @@ JSON
             ;;
         *)
             echo "unexpected bw get item: $name" >&2
+            exit 1
+            ;;
+    esac
+fi
+
+if [ "$1" = "list" ] && [ "$2" = "items" ]; then
+    # `bw list items [--search <term>]`. Echo a minimal items array.
+    search=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --search) search="$2"; shift 2 ;;
+            *) shift ;;
+        esac
+    done
+    if [ -z "$search" ] || [ "$search" = "test" ]; then
+        cat <<'JSON'
+{"success":true,"data":[{"id":"uuid-test-item","name":"test-item","type":1},{"id":"uuid-note","name":"test-note","type":2}]}
+JSON
+        exit 0
+    fi
+    cat <<'JSON'
+{"success":true,"data":[]}
+JSON
+    exit 0
+fi
+
+if [ "$1" = "edit" ] && [ "$2" = "item" ]; then
+    id="$3"
+    # Drain stdin (the base64 payload). hasp must use the stdin variant
+    # rather than positional argv; if the fake bin still observes a
+    # positional argument, the implementation regressed.
+    if [ -n "$4" ]; then
+        echo "fake bw: edit must not pass payload on argv (got positional $4)" >&2
+        exit 1
+    fi
+    cat >/dev/null
+    case "$id" in
+        uuid-test-item)
+            echo '{"success":true,"data":{"object":"item","id":"uuid-test-item"}}'
+            exit 0
+            ;;
+        *)
+            echo '{"success":false,"message":"Not found."}'
+            exit 1
+            ;;
+    esac
+fi
+
+if [ "$1" = "create" ] && [ "$2" = "item" ]; then
+    # Drain stdin (the base64 payload). Same argv-shape contract.
+    if [ -n "$3" ]; then
+        echo "fake bw: create must not pass payload on argv (got positional $3)" >&2
+        exit 1
+    fi
+    cat >/dev/null
+    echo '{"success":true,"data":{"object":"item","id":"uuid-created-item"}}'
+    exit 0
+fi
+
+if [ "$1" = "delete" ] && [ "$2" = "item" ]; then
+    id="$3"
+    case "$id" in
+        uuid-test-item)
+            echo '{"success":true,"data":null}'
+            exit 0
+            ;;
+        *)
+            echo '{"success":false,"message":"Not found."}'
             exit 1
             ;;
     esac

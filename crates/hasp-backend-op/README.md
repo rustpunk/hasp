@@ -24,16 +24,44 @@ appear in error messages (redacted per URL discipline).
 | `list`    | Supported (`op item list --vault <vault> --format=json`) |
 | `delete`  | Supported (`op item delete` — removes the entire item; the URL's `field` segment is ignored) |
 
+### Wall-clock budget on `put`
+
+`put` is a read-modify-write: hasp first runs `op item get
+--format=json`, splices the field value into the returned template,
+then pipes the mutated JSON to `op item edit … -`. Both subprocess
+invocations carry the standard `GET_TIMEOUT` (15s), so a slow `op`
+binary can take up to **30 seconds** before a `put` surfaces a
+timeout error. Operators expecting per-operation latency parity with
+`get` should account for this — `put` is structurally two round
+trips to the 1Password backend.
+
+The create-fallback branch (when `op item get` returns NotFound) has
+the same shape: a failed `get` plus an `op item create … -`, also
+bounded by `2 * GET_TIMEOUT`.
+
 ### Argv exposure on `put`
 
-`op item edit` and `op item create` accept the secret value only as
-a positional `<field>=<value>` argument. The value lives on `op`'s
-argv for the life of the subprocess. On Linux, `/proc/<pid>/cmdline`
-is same-uid readable — a same-uid attacker can observe the value
-during the brief subprocess lifetime. This is the documented cost of
-the `op` CLI surface and applies to every op-based tool. The
-mitigation when `op` exposes a stdin variant (or when the Connect
-HTTP backend lands) is a follow-up.
+hasp's `put` feeds the JSON template through stdin (`op item edit
+<item> --vault <vault> -` and the symmetric `op item create … -`) so
+the secret value never lives on `op`'s argv. On Linux this collapses
+the exposure window from "full subprocess lifetime —
+`/proc/<pid>/cmdline` is same-uid readable" to "pipe consumption
+interval — `/proc/<pid>/fd/0` is gated by `PTRACE_MODE_READ_FSCREDS`
+and `yama.ptrace_scope`". 1Password explicitly recommends this path
+in the [item-edit docs](https://developer.1password.com/docs/cli/item-edit/):
+*"Command arguments get logged in your command history, and can be
+visible to other processes on your machine. If you're assigning
+sensitive values, use a JSON template instead."*
+
+The `edit` branch is read-modify-write: hasp first issues
+`op item get --format=json`, splices the new value into the matching
+field's `value`, and pipes the modified template to `op item edit`.
+The `create` branch (NotFound fallback) builds a minimum-viable
+`PASSWORD`-category template in-process. Neither branch carries
+secret bytes on argv.
+
+Connect HTTP would eliminate the subprocess entirely and recover the
+401/403/404 distinction; tracked as a separate feature.
 
 ### Rename caveat on `list`
 
@@ -73,13 +101,15 @@ authorization-aware design preventing existence oracles). These map to
 
 ## Deferred
 
-- **Connect HTTP backend**: Would recover 401/403/404 distinction;
-  deferred to a future wave with a separate feature flag and a
+- **Connect HTTP backend**: Would recover 401/403/404 distinction
+  and eliminate the subprocess. Separate feature flag with a
   name-to-UUID resolution dance.
 - **UUID-tuple cache resolution**: `list` already emits UUIDs when
   `op item list --format=json` carries `id`. The follow-up extends
   this to a `Backend::canonical_cache_key` method that resolves
   vault/item names to UUIDs at fetch time, closing the rename
   caveat for the cache layer.
-- **stdin / Connect-HTTP value path for `put`**: Removes the
-  `/proc/<pid>/cmdline` argv exposure.
+- **Passkey-preserving edit**: `op item edit` via the JSON-template
+  path overwrites passkeys (per the 1Password docs). hasp inherits
+  this footgun; a defensive check (refuse to edit items whose
+  template contains a passkey field) is tracked separately.

@@ -312,44 +312,53 @@ impl Backend for OpBackend {
         let op_url = OpUrl::try_from(url)?;
         let reference = format!("op://{}/{}/{}", op_url.vault, op_url.item, op_url.field);
 
-        // `op item edit` requires positional `<field>=<value>` and an
-        // existing item. Try edit first; on NotFound fall back to
-        // `op item create`.
-        //
-        // Argv exposure: the secret value lives on `op`'s argv for the
-        // life of the subprocess. On Linux, `/proc/<pid>/cmdline` is
-        // same-uid readable — the documented cost of the
-        // `op item edit|create` API surface (no stdin variant for
-        // field values).
-        let assignment = format!("{}={}", op_url.field, value.expose_secret());
-
-        let edit_args: [&str; 6] = [
+        // Fetch the existing item template, splice the field, send the
+        // mutated JSON via stdin to `op item edit … -`. On NotFound
+        // build a minimum-viable template and pipe to `op item create
+        // … -`. Stdin-piped JSON keeps the value off `op`'s argv —
+        // `/proc/<pid>/cmdline` no longer exposes the secret bytes.
+        let get_args: [&str; 6] = [
             "item",
-            "edit",
+            "get",
             &op_url.item,
             "--vault",
             &op_url.vault,
-            &assignment,
+            "--format=json",
         ];
-        let edit_output = run_op_with_timeout(&edit_args, GET_TIMEOUT)?;
+        let get_output = run_op_with_timeout(&get_args, GET_TIMEOUT)?;
 
-        if edit_output.status.success() {
-            return Ok(());
+        if get_output.status.success() {
+            let template = build_edit_template(
+                &get_output.stdout,
+                &op_url.field,
+                value.expose_secret(),
+                &reference,
+            )?;
+            let edit_args: [&str; 6] =
+                ["item", "edit", &op_url.item, "--vault", &op_url.vault, "-"];
+            let edit_output = run_op_with_stdin(&edit_args, template.as_bytes(), GET_TIMEOUT)?;
+            if edit_output.status.success() {
+                return Ok(());
+            }
+            let stderr = String::from_utf8_lossy(&edit_output.stderr);
+            return Err(map_op_error(
+                &stderr,
+                edit_output.status.code().unwrap_or(-1),
+                &reference,
+            ));
         }
 
-        let edit_err = map_op_error(
-            &String::from_utf8_lossy(&edit_output.stderr),
-            edit_output.status.code().unwrap_or(-1),
+        let get_err = map_op_error(
+            &String::from_utf8_lossy(&get_output.stderr),
+            get_output.status.code().unwrap_or(-1),
             &reference,
         );
-
-        // Only fall back to create on NotFound. AuthenticationFailed,
-        // PermissionDenied, transport — surface as-is.
-        if !matches!(edit_err, Error::NotFound(_)) {
-            return Err(edit_err);
+        if !matches!(get_err, Error::NotFound(_)) {
+            return Err(get_err);
         }
 
-        let create_args: [&str; 8] = [
+        let template = build_create_template(&op_url.item, &op_url.field, value.expose_secret());
+        let create_args: [&str; 9] = [
             "item",
             "create",
             "--vault",
@@ -358,22 +367,17 @@ impl Backend for OpBackend {
             &op_url.item,
             "--category",
             "password",
+            "-",
         ];
-        // Append the field assignment as a 9th positional. `op item
-        // create` accepts arbitrary `<field>=<value>` after the named
-        // flags; the password category default-assigns the value to
-        // the `password` field, but explicit `<field>=<value>`
-        // overrides for non-default field names.
-        let mut create_args = create_args.to_vec();
-        create_args.push(&assignment);
-        let create_output = run_op_with_timeout(&create_args, GET_TIMEOUT)?;
-
+        let create_output = run_op_with_stdin(&create_args, template.as_bytes(), GET_TIMEOUT)?;
         if !create_output.status.success() {
             let stderr = String::from_utf8_lossy(&create_output.stderr);
-            let exit_code = create_output.status.code().unwrap_or(-1);
-            return Err(map_op_error(&stderr, exit_code, &reference));
+            return Err(map_op_error(
+                &stderr,
+                create_output.status.code().unwrap_or(-1),
+                &reference,
+            ));
         }
-
         Ok(())
     }
 
@@ -516,12 +520,51 @@ impl Backend for OpBackend {
 /// UTF-8 validation that corrupts binary bytes when writing to a
 /// non-pipe FD (verified community finding).
 fn run_op_with_timeout(args: &[&str], timeout: Duration) -> Result<std::process::Output, Error> {
+    run_op_inner(args, None, timeout)
+}
+
+/// Same as `run_op_with_timeout` but feeds `stdin_bytes` to the child's
+/// stdin (closing the pipe afterward). Used by `put` so the JSON template
+/// carrying the field value never lives on argv.
+fn run_op_with_stdin(
+    args: &[&str],
+    stdin_bytes: &[u8],
+    timeout: Duration,
+) -> Result<std::process::Output, Error> {
+    run_op_inner(args, Some(stdin_bytes), timeout)
+}
+
+fn run_op_inner(
+    args: &[&str],
+    stdin_bytes: Option<&[u8]>,
+    timeout: Duration,
+) -> Result<std::process::Output, Error> {
+    let stdin_cfg = if stdin_bytes.is_some() {
+        Stdio::piped()
+    } else {
+        Stdio::null()
+    };
     let mut child = Command::new("op")
         .args(args)
+        .stdin(stdin_cfg)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .map_err(map_spawn_error)?;
+
+    if let Some(bytes) = stdin_bytes {
+        let mut stdin = child.stdin.take().expect("piped stdin");
+        if let Err(e) = std::io::Write::write_all(&mut stdin, bytes) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(Error::Backend {
+                scheme: "op",
+                kind: BackendFailureKind::Transient,
+                message: format!("failed to write op stdin: {e}"),
+            });
+        }
+        drop(stdin);
+    }
 
     let mut stdout_pipe = child.stdout.take().expect("piped stdout");
     let mut stderr_pipe = child.stderr.take().expect("piped stderr");
@@ -571,6 +614,85 @@ fn run_op_with_timeout(args: &[&str], timeout: Duration) -> Result<std::process:
             }
         }
     }
+}
+
+/// Splice a new value into a `FullItem` JSON template returned by
+/// `op item get --format=json`, locating the target field by `id` and
+/// falling back to `label`. The mutated JSON is serialized for piping
+/// to `op item edit … -`. If the field isn't already on the item, it
+/// is appended as a CONCEALED entry — the same shape `op` produces for
+/// freshly-created password fields.
+fn build_edit_template(
+    raw_json: &[u8],
+    field: &str,
+    value: &str,
+    reference: &str,
+) -> Result<String, Error> {
+    let mut doc: serde_json::Value =
+        serde_json::from_slice(raw_json).map_err(|e| Error::Backend {
+            scheme: "op",
+            kind: BackendFailureKind::Permanent,
+            message: format!("op item get returned unparseable JSON: {e}"),
+        })?;
+
+    let fields = doc
+        .get_mut("fields")
+        .and_then(|v| v.as_array_mut())
+        .ok_or_else(|| Error::Backend {
+            scheme: "op",
+            kind: BackendFailureKind::Permanent,
+            message: format!("op item template missing fields[] for {reference}"),
+        })?;
+
+    let mut spliced = false;
+    for entry in fields.iter_mut() {
+        let id_matches = entry
+            .get("id")
+            .and_then(|v| v.as_str())
+            .is_some_and(|s| s == field);
+        let label_matches = entry
+            .get("label")
+            .and_then(|v| v.as_str())
+            .is_some_and(|s| s == field);
+        if id_matches || label_matches {
+            if let Some(obj) = entry.as_object_mut() {
+                obj.insert("value".into(), serde_json::Value::String(value.to_owned()));
+                spliced = true;
+                break;
+            }
+        }
+    }
+    if !spliced {
+        fields.push(serde_json::json!({
+            "id": field,
+            "label": field,
+            "type": "CONCEALED",
+            "purpose": "",
+            "value": value,
+        }));
+    }
+    serde_json::to_string(&doc).map_err(|e| Error::Backend {
+        scheme: "op",
+        kind: BackendFailureKind::Permanent,
+        message: format!("failed to serialize op edit template: {e}"),
+    })
+}
+
+/// Build a minimum-viable PASSWORD-category template for
+/// `op item create … -`. Only the requested field is populated.
+fn build_create_template(item: &str, field: &str, value: &str) -> String {
+    let doc = serde_json::json!({
+        "title": item,
+        "category": "PASSWORD",
+        "fields": [{
+            "id": field,
+            "label": field,
+            "type": "CONCEALED",
+            "purpose": "",
+            "value": value,
+        }],
+    });
+    doc.to_string()
 }
 
 fn map_spawn_error(err: std::io::Error) -> Error {

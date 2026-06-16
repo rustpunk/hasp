@@ -41,6 +41,9 @@ pub use hasp_core::{
     SecretString, StderrSink, Verb,
 };
 
+#[cfg(feature = "cache-persistent")]
+pub use hasp_core::cache::PersistentPolicy;
+
 #[cfg(feature = "aws-sm")]
 pub use hasp_backend_aws_sm::AwsSmBackend;
 
@@ -267,22 +270,63 @@ impl StoreBuilder {
     }
 
     /// Build the final [`Store`].
+    ///
+    /// For the `Persistent` cache policy, an unreachable OS keyring
+    /// silently degrades to `Disabled` here (the in-memory cache is
+    /// dropped, and the user's flow proceeds with backend fetch on
+    /// every URL). Library consumers that need the fail-closed
+    /// `PermissionDenied` surface should call [`Self::try_build`]
+    /// instead — that is the path the CLI takes so the failure
+    /// surfaces as exit code 3.
     pub fn build(self) -> Store {
+        let StoreBuilder {
+            policy,
+            hardening_token,
+            audit_sink,
+            defaults,
+            extra_backends,
+            proxy,
+            retry,
+        } = self;
         let mut store = Store::empty();
-        store.audit_sink = self.audit_sink.clone();
-        if let Some(token) = self.hardening_token {
-            store.cache = ProcessCache::new(&self.policy, token, self.audit_sink);
+        store.audit_sink = audit_sink.clone();
+        if let Some(token) = hardening_token {
+            store.cache = ProcessCache::new(&policy, token, audit_sink).unwrap_or_default();
         }
-
-        if self.defaults {
-            register_default_backends(&mut store, &self.proxy, self.retry);
+        if defaults {
+            register_default_backends(&mut store, &proxy, retry);
         }
-
-        for backend in self.extra_backends {
+        for backend in extra_backends {
             store.register(backend);
         }
-
         store
+    }
+
+    /// Fail-closed build: surfaces `Error::PermissionDenied` when the
+    /// `Persistent` cache policy is requested and the OS keyring is
+    /// unreachable. Non-persistent policies never fail here.
+    pub fn try_build(self) -> Result<Store, Error> {
+        let StoreBuilder {
+            policy,
+            hardening_token,
+            audit_sink,
+            defaults,
+            extra_backends,
+            proxy,
+            retry,
+        } = self;
+        let mut store = Store::empty();
+        store.audit_sink = audit_sink.clone();
+        if let Some(token) = hardening_token {
+            store.cache = ProcessCache::new(&policy, token, audit_sink)?;
+        }
+        if defaults {
+            register_default_backends(&mut store, &proxy, retry);
+        }
+        for backend in extra_backends {
+            store.register(backend);
+        }
+        Ok(store)
     }
 }
 
@@ -413,12 +457,49 @@ impl Store {
     ///
     /// Used by `hasp cache clear` and for surgical invalidation when a
     /// library consumer rotates secrets out-of-band. Emits a single
-    /// `cache.clear` audit event with `src_scheme = "all"`.
+    /// `cache.clear` audit event with `src_scheme = "all"`. The
+    /// persistent on-disk file (when configured) is also removed;
+    /// pass `forget_key` to drop the keyring-bound symmetric key on
+    /// top of the file.
     pub fn clear_cache(&self) {
+        self.clear_cache_with(false);
+    }
+
+    /// `clear_cache` variant that also forgets the keyring-bound
+    /// symmetric key for the persistent file. Use when the user
+    /// wants the cache file to be undecryptable post-clear (e.g.,
+    /// pre-archive cleanup).
+    pub fn clear_cache_with(&self, forget_key: bool) {
         if let Some(cache) = &self.cache {
             cache.invalidate_all();
+            #[cfg(feature = "cache-persistent")]
+            {
+                let _ = cache.clear_persistent_file(forget_key);
+            }
+            #[cfg(not(feature = "cache-persistent"))]
+            {
+                let _ = forget_key;
+            }
             self.audit(AuditEvent::cache(CacheEvent::Clear, "all"));
         }
+    }
+
+    /// Persist the cache snapshot to disk when the cache is in
+    /// `Persistent` mode; no-op otherwise. Called by the CLI on the
+    /// successful exit path so the next invocation can warm from the
+    /// encrypted file.
+    pub fn save_cache(&self) -> Result<(), Error> {
+        if let Some(cache) = &self.cache {
+            #[cfg(feature = "cache-persistent")]
+            {
+                cache.save_to_disk()?;
+            }
+            #[cfg(not(feature = "cache-persistent"))]
+            {
+                let _ = cache;
+            }
+        }
+        Ok(())
     }
 
     /// Whether this store has a cache layer installed. Used by the CLI

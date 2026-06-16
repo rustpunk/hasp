@@ -11,6 +11,79 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `cache-persistent` Cargo feature now ships a real on-disk encrypted
+  cache (#22a). When the feature is built in and `HASP_CACHE_TTL` is
+  set, the per-invocation cache snapshot is written to
+  `$XDG_CACHE_HOME/hasp/cache.bin` on the success exit path, mode
+  `0o600` on Unix, atomically replaced via tempfile + rename. The
+  payload is XChaCha20-Poly1305 AEAD with a 24-byte random nonce per
+  save; the 32-byte symmetric key lives in the OS keyring under
+  service `hasp`, account `cache:<user>` (the first `Entry::get_secret`
+  doubles as the headless-container probe). Loading on `ProcessCache::new`
+  drops TTL-expired entries and treats AEAD-tamper as a cold cache.
+  AWS Secrets Manager Agent's verbatim threat-model warning is
+  reproduced on the type doc: *"After the secret value is pulled into
+  the cache, any user with access to the compute environment can
+  access the secret from the cache."* Fail-closed when the OS keyring
+  is unreachable: `StoreBuilder::try_build` surfaces
+  `Error::PermissionDenied`, which the CLI maps to exit code 3 — no
+  silent file fallback. New audit-event labels `cache.load`,
+  `cache.save`, `cache.tamper_rejected`; `audit_no_leak.rs` proptest
+  extended. `Backend::canonical_cache_key` (UUID-tuple keying for
+  `op://` rename stability) is filed as a separate follow-up issue;
+  this release uses URL-string cache keys.
+- `hasp cache clear --forget-key` removes the OS-keyring entry
+  holding the cache symmetric key on top of the on-disk file
+  deletion. Pre-archive cleanup hook for hardened deployments.
+- `Store::save_cache()` and `StoreBuilder::try_build()` public API
+  surface for library consumers that want the fail-closed keyring
+  contract.
+
+### Changed
+
+- `op://` `put` no longer carries the secret value on `op`'s argv (#27).
+  The implementation now fetches the existing item via
+  `op item get --format=json`, splices the new value into the matching
+  field's `value`, and pipes the JSON template through stdin to
+  `op item edit <item> --vault <vault> -`. The `create` branch
+  (NotFound fallback) builds a minimum-viable `PASSWORD`-category
+  template in-process and pipes to `op item create … -`. On Linux this
+  shrinks the exposure window from "full subprocess lifetime
+  (`/proc/<pid>/cmdline` is same-uid readable)" to "pipe consumption
+  interval (`/proc/<pid>/fd/0` is gated by `PTRACE_MODE_READ_FSCREDS`
+  and `yama.ptrace_scope`)" — the path 1Password's own docs recommend.
+  Stdin support was added to `bw://` `put` from the start in #23, so
+  `op://` is the only backend that changed posture. The `FakeOpGuard`
+  test scaffold rejects the legacy argv shape — regressions surface
+  immediately. README's "Argv exposure on `put`" section rewritten.
+
+### Added
+
+- `bw://` backend `put` / `delete` / `list` (#23). `put` does a
+  read-modify-write against `bw edit item <uuid>` because Bitwarden's
+  CLI replaces the whole item document on every edit — hasp fetches
+  the existing item, splices the field at the URL's `<field-path>`,
+  base64-encodes the JSON, and feeds it through **stdin** rather than
+  argv. On `NotFound` it falls through to `bw create item` with a
+  minimum Login (or SecureNote for `notes`) — also stdin-fed.
+  `delete` is soft (Trash, recoverable for 30 days); `--permanent` is
+  not exposed. `list` honors `bw://<search>` (forwarded to
+  `bw list items --search`) and the sentinel host `bw://_` for an
+  unfiltered listing. Entry URLs prefer the JSON `id` (UUID,
+  rename-stable) over the title, matching the `op://` shape. New
+  workspace dep `base64 = "0.22"` (required because `bw edit/create
+  item` accept payloads only as base64-encoded JSON).
+- `Backend::get_into(&self, &Url, &mut SecretString)` trait method
+  (#24): sized-read extension for backends whose transport reveals
+  the value length up front (file metadata, HTTP `Content-Length`,
+  keyring entries). The default impl falls back to `get` and copies;
+  `FileBackend` overrides to reserve exactly the byte count returned
+  by `metadata.len()` so the plaintext lives in a single
+  non-reallocated buffer when `?raw=true` is in play. Soft breaking
+  change for downstream `Backend` impls — they inherit the default
+  automatically. Companion helper
+  `hasp_core::secret_mem::read_to_secret_string` exposes the same
+  exact-fit discipline to backends that own their own I/O loop.
 - Per-invocation in-process secret cache (`hasp_core::cache`) replacing
   the previous hand-rolled `Store`-level HashMap cache (#8 Approach E).
   Built on `moka::sync` with an eviction listener that explicitly drops
@@ -38,18 +111,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `hasp_core::install()` returning a `HardeningToken` witness type;
   re-exported via `hasp::install_hardening`.
 - `hasp cache clear` CLI subcommand. Drops every in-process cache
-  entry (and, when the `cache-persistent` Cargo feature ships its
-  implementation, will also remove the on-disk encrypted cache file
-  and its OS-keyring-bound key).
-- `cache-persistent` Cargo feature scaffold on `hasp-core` (#8
-  Approach A). Compiles the `CachePolicy::Persistent(PersistentPolicy)`
-  variant so binary builders can wire `HASP_CACHE_TTL` and the
-  `hasp cache clear` subcommand today; the encrypted-file
-  implementation (XChaCha20-Poly1305 + OS-keyring key + UUID-tuple
-  cache keys for `op://`) lands in a follow-up so `hasp-core` stays
-  free of platform-specific keyring dependencies for now. Today,
-  constructing a `Persistent` policy falls back to the in-process
-  policy with the persistent TTL/capacity.
+  entry; with the `cache-persistent` feature also removes the
+  encrypted on-disk file (see the #22a entry above for the full
+  shape, including `--forget-key`).
+- `CachePolicy::Persistent(PersistentPolicy)` variant on
+  `hasp-core` (#8 Approach A). Originally landed as a scaffold;
+  the real encrypted-file implementation ships in #22a (see top of
+  this release).
 - `HASP_CACHE_TTL=<seconds>` env var. Overrides the default cache
   TTL (1..=3600). Values above 3600 clamp to AWS Agent's published
   1-hour ceiling; `0` disables the cache entirely.

@@ -40,7 +40,18 @@ memory-lock = ["windows-sys/Win32_System_Memory"]
 # enable when the deployment threat model has been considered — see
 # `docs/src/cli-reference.md#persistent-cache` and the AWS Secrets
 # Manager Agent verbatim warning quoted there.
-cache-persistent = ["dep:dirs"]
+cache-persistent = [
+    "dep:dirs",
+    "dep:keyring-core",
+    "dep:chacha20poly1305",
+    "dep:getrandom",
+    "dep:base64",
+    "dep:serde",
+    "dep:tempfile",
+    "dep:apple-native-keyring-store",
+    "dep:windows-native-keyring-store",
+    "dep:dbus-secret-service-keyring-store",
+]
 
 [dependencies]
 url = "2.5"
@@ -54,11 +65,39 @@ tempfile = { version = "3", optional = true }
 # on eviction. Pinned to the `sync` feature only — no async / future
 # integration is needed at this layer.
 moka = { version = "0.12", default-features = false, features = ["sync"] }
-# cache-persistent feature deps. `dirs` is the only non-platform-
-# specific dep needed by the scaffold for resolving the default cache
-# file path; encryption + keyring deps land with the actual
-# implementation in a follow-up.
+# cache-persistent feature deps. `dirs` resolves the default cache file
+# path; `keyring-core` (+ per-platform stores below) binds the
+# per-host symmetric key to the OS keyring; `chacha20poly1305` is the
+# AEAD; `getrandom` seeds nonces and the first-use key; `base64`
+# encodes secret bytes in the JSON envelope; `serde` carries the
+# envelope schema.
 dirs = { version = "6", optional = true }
+# Vetted 2026-05-15: open-source-cooperative/keyring-rs 1.0 (April 2026).
+# Same pinned version that hasp-backend-keyring uses; keeps a single
+# transitive across the workspace.
+keyring-core = { version = "1.0", optional = true }
+# Vetted 2026-05-15: RustCrypto/AEADs, MIT/Apache, RFC 8439 + XChaCha20
+# extension. 24-byte XNonce makes per-save random selection
+# collision-resistant at any realistic save volume.
+chacha20poly1305 = { version = "0.10", optional = true }
+# Vetted 2026-05-15: rust-random/getrandom, MIT/Apache. Sources entropy
+# from the OS RNG.
+getrandom = { version = "0.2", optional = true }
+# Vetted 2026-05-15: marshallpierce/rust-base64, MIT/Apache. Already
+# used by hasp-backend-bw and hasp-backend-gcp-sm.
+base64 = { version = "0.22", optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
+
+[target.'cfg(all(target_os = "macos"))'.dependencies]
+apple-native-keyring-store = { version = "1.0", optional = true }
+
+[target.'cfg(all(target_os = "windows"))'.dependencies]
+windows-native-keyring-store = { version = "1.0", optional = true }
+
+[target.'cfg(all(target_os = "linux"))'.dependencies]
+dbus-secret-service-keyring-store = { version = "1.0", features = [
+    "crypto-rust",
+], optional = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
