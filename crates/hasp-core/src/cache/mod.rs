@@ -190,6 +190,7 @@ impl CachePolicy {
 #[derive(Clone)]
 pub struct ProcessCache {
     inner: Cache<CacheKey, Arc<SecretString>>,
+    #[cfg(feature = "cache-persistent")]
     ttl: Duration,
     /// Per-entry insertion timestamps. moka does not expose
     /// `inserted_at` from its iter API, so the cache tracks it here
@@ -201,6 +202,7 @@ pub struct ProcessCache {
     inserted_at: Arc<Mutex<HashMap<CacheKey, SystemTime>>>,
     #[cfg(feature = "cache-persistent")]
     persistent: Option<Arc<PersistentStore>>,
+    #[cfg(feature = "cache-persistent")]
     audit_sink: Option<Arc<dyn AuditSink>>,
 }
 
@@ -226,12 +228,12 @@ impl ProcessCache {
     /// the fail-closed contract.
     pub fn new(
         policy: &CachePolicy,
-        token: HardeningToken,
+        _token: HardeningToken,
         audit_sink: Option<Arc<dyn AuditSink>>,
     ) -> Result<Option<Self>, Error> {
         match policy {
             #[cfg(feature = "cache-persistent")]
-            CachePolicy::Persistent(p) => Self::build_persistent(p, token, audit_sink),
+            CachePolicy::Persistent(p) => Self::build_persistent(p, _token, audit_sink),
             CachePolicy::Disabled => Ok(None),
             CachePolicy::Process { ttl, capacity } => Ok(Some(Self::build_process(
                 *ttl,
@@ -274,10 +276,12 @@ impl ProcessCache {
             .build();
         Self {
             inner,
+            #[cfg(feature = "cache-persistent")]
             ttl,
             inserted_at,
             #[cfg(feature = "cache-persistent")]
             persistent,
+            #[cfg(feature = "cache-persistent")]
             audit_sink,
         }
     }
