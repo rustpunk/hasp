@@ -76,6 +76,68 @@ db_password = "env://DB_PASSWORD"
 This prevents ambiguity: a bare `@name` only works when you've
 explicitly defined it as a shorthand.
 
+## Trust model — `hasp profile allow`
+
+A `profiles.toml` that was silently modified (by a compromised
+installer, a synced dotfiles repo, or an over-broad `chmod`) can
+redirect every `hasp` invocation to attacker-controlled URLs without
+any visible warning. The `profile allow` model closes this gap.
+
+### How it works
+
+1. After writing or updating `profiles.toml`, run:
+
+   ```bash
+   hasp profile allow
+   ```
+
+   This records the file's mtime and SHA-256 fingerprint in
+   `profiles.allowed` (same directory, `0600` on Unix).
+
+2. To enforce the check for every subsequent invocation, set:
+
+   ```bash
+   export HASP_REQUIRE_PROFILE_ALLOW=1
+   ```
+
+   With this variable set, `hasp` refuses any command that would use
+   profile aliases unless the current `profiles.toml` exactly matches
+   the recorded fingerprint. Any modification invalidates trust — run
+   `allow` again after reviewing the change.
+
+3. Check the current status:
+
+   ```bash
+   hasp profile show
+   ```
+
+   Output:
+   ```
+   Path:    /home/user/.config/hasp/profiles.toml
+   Mtime:   2026-05-14T12:34:56Z
+   Allowed: yes (last allowed at 2026-05-14T12:34:56Z)
+   ```
+
+### CI environments
+
+In a CI pipeline where `profiles.toml` is checked into source control
+and cannot be re-allowed interactively, use:
+
+```bash
+# Either: bypass per-invocation
+hasp --no-profile-allow get @ci/secret
+
+# Or: do not set HASP_REQUIRE_PROFILE_ALLOW in CI at all
+# (enforcement is opt-in; pipelines that never set the var are unaffected)
+```
+
+### Opt-in status
+
+Enforcement is opt-in for the current release cycle. The intent is to
+make it the default in a subsequent release after observing user
+workflows. Profiles without any allow record are silently trusted when
+`HASP_REQUIRE_PROFILE_ALLOW` is unset.
+
 ## No sensitive data in profiles.toml
 
 Profile files contain only names and URLs. Never put secret values

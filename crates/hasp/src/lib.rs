@@ -31,9 +31,14 @@
 //! Backends wrap raw bytes at the earliest possible moment so `Debug`
 //! output never leaks secret values.
 
+#[cfg(unix)]
+pub use hasp_core::SyslogSink;
 pub use hasp_core::{
-    scheme_from_url, Backend as BackendTrait, BackendFailureKind, Entry, Error, ExposeSecret,
-    ProxyConfig, RetryBackend, SecretString,
+    apply_mitigations, check_refusal_conditions, harden_process, install as install_hardening,
+    scheme_from_url, AuditEvent, AuditSink, Backend as BackendTrait, BackendFailureKind,
+    CacheEvent, CacheKey, CachePolicy, Entry, Error, ExposeSecret, FileSink, HardenRefusal,
+    HardeningToken, MitigationOutcome, NoopSink, ProcessCache, ProxyConfig, RetryBackend,
+    SecretString, StderrSink, Verb,
 };
 
 #[cfg(feature = "aws-sm")]
@@ -68,8 +73,7 @@ pub use hasp_backend_azure_kv::AzureKvBackend;
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::RwLock;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use url::Url;
 
 pub type Backend = Arc<dyn hasp_core::Backend>;
@@ -142,14 +146,17 @@ pub fn azure_kv() -> Backend {
 /// Fluent builder for a [`Store`] with optional proxy configuration.
 ///
 /// Create a builder with `StoreBuilder::with_defaults()`, optionally
-/// call `.proxy(Some(config))` and `.cache_ttl(Some(Duration::from_secs(60)))`,
-/// then finish with `.build()`.
+/// call `.proxy(Some(config))` and
+/// `.with_cache_policy(CachePolicy::process_default(), token)`, then
+/// finish with `.build()`.
 pub struct StoreBuilder {
     proxy: Option<ProxyConfig>,
     defaults: bool,
     extra_backends: Vec<Backend>,
-    ttl: Option<Duration>,
+    policy: CachePolicy,
+    hardening_token: Option<HardeningToken>,
     retry: Option<(u32, Duration)>,
+    audit_sink: Option<Arc<dyn AuditSink>>,
 }
 
 impl StoreBuilder {
@@ -159,8 +166,10 @@ impl StoreBuilder {
             proxy: None,
             defaults: false,
             extra_backends: Vec::new(),
-            ttl: None,
+            policy: CachePolicy::Disabled,
+            hardening_token: None,
             retry: None,
+            audit_sink: None,
         }
     }
 
@@ -171,8 +180,10 @@ impl StoreBuilder {
             proxy: None,
             defaults: true,
             extra_backends: Vec::new(),
-            ttl: None,
+            policy: CachePolicy::Disabled,
+            hardening_token: None,
             retry: None,
+            audit_sink: None,
         }
     }
 
@@ -182,9 +193,48 @@ impl StoreBuilder {
         self
     }
 
-    /// Set a TTL for the `Store` memoization cache. `None` disables caching.
+    /// Set a TTL for the `Store` memoization cache. `None` disables
+    /// caching.
+    ///
+    /// Ergonomic shorthand: attempts to install process hardening via
+    /// [`hasp_core::install`] when `ttl` is `Some`. On refusal (e.g.
+    /// `LD_PRELOAD` set), caching is silently disabled — the build
+    /// continues without a cache. Callers that require hardening to be
+    /// in place should use [`StoreBuilder::with_cache_policy`] directly.
     pub fn cache_ttl(mut self, ttl: Option<Duration>) -> Self {
-        self.ttl = ttl;
+        match ttl {
+            Some(ttl) => match hasp_core::install() {
+                Ok(token) => {
+                    self.policy = CachePolicy::Process {
+                        ttl,
+                        capacity: 1024,
+                    };
+                    self.hardening_token = Some(token);
+                }
+                Err(_) => {
+                    self.policy = CachePolicy::Disabled;
+                    self.hardening_token = None;
+                }
+            },
+            None => {
+                self.policy = CachePolicy::Disabled;
+                self.hardening_token = None;
+            }
+        }
+        self
+    }
+
+    /// Set a cache policy with an explicit hardening token.
+    ///
+    /// This is the architecturally correct path: caching cannot be
+    /// installed without a [`HardeningToken`] (witness of
+    /// `PR_SET_DUMPABLE=0`, `RLIMIT_CORE=0`, and env-injection
+    /// refusal). Library consumers that build their own hardening
+    /// discipline should call [`hasp_core::install`] and pass the
+    /// returned token here.
+    pub fn with_cache_policy(mut self, policy: CachePolicy, token: HardeningToken) -> Self {
+        self.policy = policy;
+        self.hardening_token = Some(token);
         self
     }
 
@@ -205,10 +255,24 @@ impl StoreBuilder {
         self
     }
 
+    /// Install an [`AuditSink`] that receives structured start/done
+    /// events from every `Store` verb.
+    ///
+    /// Events are value-free by construction (see
+    /// [`hasp_core::audit`]). If unset, the store emits no audit
+    /// events — equivalent to a [`NoopSink`].
+    pub fn with_audit_sink(mut self, sink: Arc<dyn AuditSink>) -> Self {
+        self.audit_sink = Some(sink);
+        self
+    }
+
     /// Build the final [`Store`].
     pub fn build(self) -> Store {
         let mut store = Store::empty();
-        store.ttl = self.ttl;
+        store.audit_sink = self.audit_sink.clone();
+        if let Some(token) = self.hardening_token {
+            store.cache = ProcessCache::new(&self.policy, token, self.audit_sink);
+        }
 
         if self.defaults {
             register_default_backends(&mut store, &self.proxy, self.retry);
@@ -269,16 +333,11 @@ fn register_default_backends(
     store.register(wrap(Arc::new(AzureKvBackend::with_proxy(proxy.clone()))));
 }
 
-struct CacheEntry {
-    secret: SecretString,
-    fetched_at: Instant,
-}
-
 /// Batteries-included secret store.
 pub struct Store {
     backends: HashMap<&'static str, Backend>,
-    cache: RwLock<HashMap<String, CacheEntry>>,
-    ttl: Option<Duration>,
+    cache: Option<ProcessCache>,
+    audit_sink: Option<Arc<dyn AuditSink>>,
 }
 
 impl Store {
@@ -286,9 +345,38 @@ impl Store {
     pub fn empty() -> Self {
         Self {
             backends: HashMap::new(),
-            cache: RwLock::new(HashMap::new()),
-            ttl: None,
+            cache: None,
+            audit_sink: None,
         }
+    }
+
+    /// Build a [`CacheKey`] for `(scheme, full URL string)`. The
+    /// scheme namespacing prevents the same URL string handled by two
+    /// backends from aliasing.
+    fn cache_key(scheme: &'static str, url: &str) -> CacheKey {
+        CacheKey::new(scheme, url)
+    }
+
+    /// Emit an audit event, if an `AuditSink` is installed.
+    fn audit(&self, event: AuditEvent) {
+        if let Some(sink) = &self.audit_sink {
+            sink.emit(&event);
+        }
+    }
+
+    /// Audit-emit a `*.done` event derived from a `Result`.
+    fn audit_done<T>(
+        &self,
+        verb: Verb,
+        scheme: &str,
+        ok_outcome: &'static str,
+        result: &Result<T, Error>,
+    ) {
+        let event = match result {
+            Ok(_) => AuditEvent::done(verb, scheme.to_owned(), ok_outcome),
+            Err(e) => AuditEvent::done(verb, scheme.to_owned(), "error").with_error_kind(e.kind()),
+        };
+        self.audit(event);
     }
 
     /// Create a store with the given backends.
@@ -321,6 +409,26 @@ impl Store {
         self.backends.insert(backend.scheme(), backend);
     }
 
+    /// Drop every cached entry. No-op if no cache is configured.
+    ///
+    /// Used by `hasp cache clear` and for surgical invalidation when a
+    /// library consumer rotates secrets out-of-band. Emits a single
+    /// `cache.clear` audit event with `src_scheme = "all"`.
+    pub fn clear_cache(&self) {
+        if let Some(cache) = &self.cache {
+            cache.invalidate_all();
+            self.audit(AuditEvent::cache(CacheEvent::Clear, "all"));
+        }
+    }
+
+    /// Whether this store has a cache layer installed. Used by the CLI
+    /// to phrase the `hasp cache clear` confirmation message
+    /// accurately (no-cache builds get a "no cache to clear" hint
+    /// instead of a misleading "cleared" line).
+    pub fn has_cache(&self) -> bool {
+        self.cache.is_some()
+    }
+
     /// Fetch a secret by URL.
     ///
     /// If the store was configured with a TTL, the result is memoized and
@@ -331,35 +439,43 @@ impl Store {
     ///
     /// Returns `Error::UnknownScheme` if no backend handles the URL's scheme.
     pub fn get(&self, url: &str) -> Result<SecretString, Error> {
-        let parsed_url = Url::parse(url)?;
+        let parsed_url = match Url::parse(url) {
+            Ok(u) => u,
+            Err(e) => return Err(Error::UrlParse(e)),
+        };
+        let scheme = parsed_url.scheme().to_owned();
+        self.audit(AuditEvent::start(Verb::Get, scheme.clone()));
+        let result = self.get_inner(&parsed_url, url);
+        self.audit_done(Verb::Get, &scheme, "ok", &result);
+        result
+    }
+
+    fn get_inner(&self, parsed_url: &Url, url: &str) -> Result<SecretString, Error> {
         let scheme = parsed_url.scheme();
         let backend = self
             .backends
             .get(scheme)
             .ok_or_else(|| Error::UnknownScheme(scheme.to_owned()))?;
+        let backend_scheme = backend.scheme();
 
-        if let Some(ttl) = self.ttl {
-            if let Ok(cache) = self.cache.read() {
-                if let Some(entry) = cache.get(url) {
-                    if entry.fetched_at.elapsed() <= ttl {
-                        return Ok(entry.secret.clone());
-                    }
-                }
+        if let Some(cache) = &self.cache {
+            let key = Self::cache_key(backend_scheme, url);
+            if let Some(arc) = cache.get(&key) {
+                self.audit(AuditEvent::cache(CacheEvent::Hit, scheme.to_owned()));
+                // Clone the SecretString out of the cache so the
+                // returned value owns its own heap buffer. The Arc
+                // retained by the cache keeps the cached entry alive
+                // until eviction.
+                return Ok((*arc).clone());
             }
+            self.audit(AuditEvent::cache(CacheEvent::Miss, scheme.to_owned()));
         }
 
-        let secret = backend.get(&parsed_url)?;
+        let secret = backend.get(parsed_url)?;
 
-        if self.ttl.is_some() {
-            if let Ok(mut cache) = self.cache.write() {
-                cache.insert(
-                    url.to_owned(),
-                    CacheEntry {
-                        secret: secret.clone(),
-                        fetched_at: Instant::now(),
-                    },
-                );
-            }
+        if let Some(cache) = &self.cache {
+            let key = Self::cache_key(backend_scheme, url);
+            cache.insert(key, Arc::new(secret.clone()));
         }
 
         Ok(secret)
@@ -378,17 +494,18 @@ impl Store {
             .get(parsed_url.scheme())
             .ok_or_else(|| Error::UnknownScheme(scheme.clone()))?;
 
-        let cached = if let Some(ttl) = self.ttl {
-            if let Ok(cache) = self.cache.read() {
-                cache
-                    .get(url)
-                    .is_some_and(|entry| entry.fetched_at.elapsed() <= ttl)
-            } else {
-                false
-            }
-        } else {
-            false
-        };
+        // Validate per-backend URL grammar so `--explain` rejects the
+        // same URLs `get`/`put` would; the dry-run path must not lie.
+        backend.validate(&parsed_url)?;
+
+        let cached = self
+            .cache
+            .as_ref()
+            .map(|c| {
+                let key = Self::cache_key(backend.scheme(), url);
+                c.get(&key).is_some()
+            })
+            .unwrap_or(false);
 
         Ok((scheme, backend.scheme(), cached))
     }
@@ -399,18 +516,27 @@ impl Store {
     ///
     /// Returns `Error::UnknownScheme` if no backend handles the URL's scheme.
     pub fn put(&self, url: &str, value: &SecretString) -> Result<(), Error> {
-        let parsed_url = Url::parse(url)?;
+        let parsed_url = match Url::parse(url) {
+            Ok(u) => u,
+            Err(e) => return Err(Error::UrlParse(e)),
+        };
+        let scheme = parsed_url.scheme().to_owned();
+        self.audit(AuditEvent::start(Verb::Put, scheme.clone()));
+        let result = self.put_inner(&parsed_url, url, value);
+        self.audit_done(Verb::Put, &scheme, "ok", &result);
+        result
+    }
+
+    fn put_inner(&self, parsed_url: &Url, url: &str, value: &SecretString) -> Result<(), Error> {
         let scheme = parsed_url.scheme();
         let backend = self
             .backends
             .get(scheme)
             .ok_or_else(|| Error::UnknownScheme(scheme.to_owned()))?;
-        backend.put(&parsed_url, value)?;
+        backend.put(parsed_url, value)?;
 
-        if self.ttl.is_some() {
-            if let Ok(mut cache) = self.cache.write() {
-                cache.remove(url);
-            }
+        if let Some(cache) = &self.cache {
+            cache.invalidate(&Self::cache_key(backend.scheme(), url));
         }
 
         Ok(())
@@ -431,13 +557,24 @@ impl Store {
     ///
     /// Returns `Error::UnknownScheme` if no backend handles the URL's scheme.
     pub fn list(&self, url: &str) -> Result<Vec<Entry>, Error> {
-        let url = Url::parse(url)?;
+        let parsed_url = match Url::parse(url) {
+            Ok(u) => u,
+            Err(e) => return Err(Error::UrlParse(e)),
+        };
+        let scheme = parsed_url.scheme().to_owned();
+        self.audit(AuditEvent::start(Verb::List, scheme.clone()));
+        let result = self.list_inner(&parsed_url);
+        self.audit_done(Verb::List, &scheme, "ok", &result);
+        result
+    }
+
+    fn list_inner(&self, url: &Url) -> Result<Vec<Entry>, Error> {
         let scheme = url.scheme();
         let backend = self
             .backends
             .get(scheme)
             .ok_or_else(|| Error::UnknownScheme(scheme.to_owned()))?;
-        let mut entries = backend.list(&url)?;
+        let mut entries = backend.list(url)?;
 
         let prefix = url.path().trim_start_matches('/').trim_end_matches('/');
         if !prefix.is_empty() {
@@ -457,18 +594,27 @@ impl Store {
     ///
     /// Returns `Error::UnknownScheme` if no backend handles the URL's scheme.
     pub fn delete(&self, url: &str) -> Result<(), Error> {
-        let parsed_url = Url::parse(url)?;
+        let parsed_url = match Url::parse(url) {
+            Ok(u) => u,
+            Err(e) => return Err(Error::UrlParse(e)),
+        };
+        let scheme = parsed_url.scheme().to_owned();
+        self.audit(AuditEvent::start(Verb::Delete, scheme.clone()));
+        let result = self.delete_inner(&parsed_url, url);
+        self.audit_done(Verb::Delete, &scheme, "ok", &result);
+        result
+    }
+
+    fn delete_inner(&self, parsed_url: &Url, url: &str) -> Result<(), Error> {
         let scheme = parsed_url.scheme();
         let backend = self
             .backends
             .get(scheme)
             .ok_or_else(|| Error::UnknownScheme(scheme.to_owned()))?;
-        backend.delete(&parsed_url)?;
+        backend.delete(parsed_url)?;
 
-        if self.ttl.is_some() {
-            if let Ok(mut cache) = self.cache.write() {
-                cache.remove(url);
-            }
+        if let Some(cache) = &self.cache {
+            cache.invalidate(&Self::cache_key(backend.scheme(), url));
         }
 
         Ok(())
@@ -483,24 +629,44 @@ impl Store {
     ///
     /// Returns `Error::UnknownScheme` if no backend handles the URL's scheme.
     pub fn exists(&self, url: &str) -> Result<bool, Error> {
-        let parsed_url = Url::parse(url)?;
-        let scheme = parsed_url.scheme();
-
-        if let Some(ttl) = self.ttl {
-            if let Ok(cache) = self.cache.read() {
-                if let Some(entry) = cache.get(url) {
-                    if entry.fetched_at.elapsed() <= ttl {
-                        return Ok(true);
-                    }
-                }
+        let parsed_url = match Url::parse(url) {
+            Ok(u) => u,
+            Err(e) => return Err(Error::UrlParse(e)),
+        };
+        let scheme = parsed_url.scheme().to_owned();
+        self.audit(AuditEvent::start(Verb::Exists, scheme.clone()));
+        let result = self.exists_inner(&parsed_url, url);
+        let outcome = match &result {
+            Ok(true) => "present",
+            Ok(false) => "absent",
+            Err(_) => "error",
+        };
+        let event = match &result {
+            Ok(_) => AuditEvent::done(Verb::Exists, scheme.clone(), outcome),
+            Err(e) => {
+                AuditEvent::done(Verb::Exists, scheme.clone(), outcome).with_error_kind(e.kind())
             }
-        }
+        };
+        self.audit(event);
+        result
+    }
 
+    fn exists_inner(&self, parsed_url: &Url, url: &str) -> Result<bool, Error> {
+        let scheme = parsed_url.scheme();
         let backend = self
             .backends
             .get(scheme)
             .ok_or_else(|| Error::UnknownScheme(scheme.to_owned()))?;
-        backend.exists(&parsed_url)
+
+        if let Some(cache) = &self.cache {
+            let key = Self::cache_key(backend.scheme(), url);
+            if cache.get(&key).is_some() {
+                self.audit(AuditEvent::cache(CacheEvent::Hit, scheme.to_owned()));
+                return Ok(true);
+            }
+        }
+
+        backend.exists(parsed_url)
     }
 
     /// Fetch multiple secrets by URL, returning per-item results.
@@ -552,15 +718,318 @@ impl Store {
     /// let results = store.bulk_put(&items);
     /// ```
     pub fn bulk_put(&self, items: &[(&str, &SecretString)]) -> Vec<Result<(), Error>> {
+        // `put` already invalidates the cache entry on success.
         items
             .iter()
-            .map(|(url, value)| {
-                let result = self.put(url, value);
-                // Cache invalidation is already handled by `put`.
-                result
-            })
+            .map(|(url, value)| self.put(url, value))
             .collect()
     }
+
+    /// Copy a secret from one backend to another.
+    ///
+    /// `cp` is the only verb that reads *and* writes a secret in a
+    /// single invocation, which widens the in-process exposure window
+    /// relative to a back-to-back `get` + `put`. The implementation
+    /// keeps the value in `SecretString` end-to-end and drops both the
+    /// fetched and (optionally) verified copies as soon as the
+    /// operation completes.
+    ///
+    /// # Behavior
+    ///
+    /// 1. Refuses when source and destination URLs are identical
+    ///    (avoids version-counter inflation on backends that version
+    ///    writes).
+    /// 2. With `dry_run`, resolves both URLs and returns
+    ///    `Ok(CopyOutcome { copied: false, .. })` without calling
+    ///    `get` or `put`.
+    /// 3. Honors `IfExists`: `Fail` returns `PreconditionFailed` when
+    ///    the destination already has a value; `Skip` returns
+    ///    `Ok(CopyOutcome { copied: false, .. })`; `Overwrite` writes
+    ///    unconditionally.
+    /// 4. With `verify`, re-reads the destination after the put and
+    ///    constant-time compares it against the source value. A
+    ///    mismatch yields `PreconditionFailed` with a generic message
+    ///    (no byte-level diff).
+    ///
+    /// # Errors
+    ///
+    /// Propagates the backend's errors for `get` / `put` / `exists`.
+    /// Returns `Error::UnsupportedOperation` when the destination
+    /// backend does not implement `put`.
+    pub fn copy(&self, src: &str, dst: &str, opts: CopyOptions) -> Result<CopyOutcome, Error> {
+        let src_url = match Url::parse(src) {
+            Ok(u) => u,
+            Err(e) => return Err(Error::UrlParse(e)),
+        };
+        let dst_url = match Url::parse(dst) {
+            Ok(u) => u,
+            Err(e) => return Err(Error::UrlParse(e)),
+        };
+        let src_scheme = src_url.scheme().to_owned();
+        let dst_scheme = dst_url.scheme().to_owned();
+        self.audit(
+            AuditEvent::start(Verb::Cp, src_scheme.clone()).with_dst_scheme(dst_scheme.clone()),
+        );
+        let result = self.copy_inner(&src_url, &dst_url, src, dst, &opts);
+        let event = match &result {
+            Ok(o) => {
+                let outcome = if opts.dry_run {
+                    "dry_run"
+                } else if o.copied {
+                    "copied"
+                } else {
+                    "skipped"
+                };
+                AuditEvent::done(Verb::Cp, src_scheme.clone(), outcome)
+                    .with_dst_scheme(dst_scheme.clone())
+            }
+            Err(e) => AuditEvent::done(Verb::Cp, src_scheme.clone(), "error")
+                .with_dst_scheme(dst_scheme.clone())
+                .with_error_kind(e.kind()),
+        };
+        self.audit(event);
+        result
+    }
+
+    fn copy_inner(
+        &self,
+        src_url: &Url,
+        dst_url: &Url,
+        src: &str,
+        dst: &str,
+        opts: &CopyOptions,
+    ) -> Result<CopyOutcome, Error> {
+        if src_url.as_str() == dst_url.as_str() {
+            return Err(Error::InvalidUrl(
+                "source and destination are identical".into(),
+            ));
+        }
+
+        // Resolve both backends up front so dry-run can report the plan.
+        let src_scheme = src_url.scheme();
+        let dst_scheme = dst_url.scheme();
+        let _src_backend = self
+            .backends
+            .get(src_scheme)
+            .ok_or_else(|| Error::UnknownScheme(src_scheme.to_owned()))?;
+        let _dst_backend = self
+            .backends
+            .get(dst_scheme)
+            .ok_or_else(|| Error::UnknownScheme(dst_scheme.to_owned()))?;
+
+        if opts.dry_run {
+            return Ok(CopyOutcome {
+                copied: false,
+                verified: false,
+            });
+        }
+
+        if !matches!(opts.if_exists, IfExists::Overwrite) {
+            match self.exists(dst) {
+                Ok(true) => match opts.if_exists {
+                    IfExists::Fail => {
+                        return Err(Error::PreconditionFailed(format!(
+                            "destination {dst} already has a value; pass --force or \
+                             --if-exists=overwrite to clobber, or --if-exists=skip to no-op"
+                        )));
+                    }
+                    IfExists::Skip => {
+                        return Ok(CopyOutcome {
+                            copied: false,
+                            verified: false,
+                        });
+                    }
+                    IfExists::Overwrite => unreachable!(),
+                },
+                Ok(false) => {}
+                // exists() not implemented on dst — proceed.
+                // The subsequent put will still surface a real error
+                // if it conflicts at the backend layer.
+                Err(Error::UnsupportedOperation { .. }) => {}
+                Err(e) => return Err(e),
+            }
+        }
+
+        let secret = self.get(src)?;
+        self.put(dst, &secret)?;
+
+        let verified = if opts.verify {
+            let readback = self.get(dst)?;
+            let a = secret.expose_secret().as_bytes();
+            let b = readback.expose_secret().as_bytes();
+            use hasp_core::subtle::ConstantTimeEq;
+            if a.len() != b.len() || a.ct_eq(b).unwrap_u8() == 0 {
+                return Err(Error::PreconditionFailed(
+                    "verify failed: source and destination differ after copy".into(),
+                ));
+            }
+            true
+        } else {
+            false
+        };
+
+        Ok(CopyOutcome {
+            copied: true,
+            verified,
+        })
+    }
+
+    /// Compare two secrets for byte-equality across (possibly different)
+    /// backends.
+    ///
+    /// `diff` is the read-only sibling of `copy`: both URLs are
+    /// fetched and compared. The returned [`DiffOutcome`] is binary —
+    /// no byte counts, positions, common prefixes, or hashes are
+    /// observable via the return value.
+    ///
+    /// # Behavior
+    ///
+    /// 1. Refuses when source and destination URLs are identical.
+    /// 2. Both schemes must resolve to a registered backend — same
+    ///    pre-flight check as `copy`, so an unknown scheme surfaces
+    ///    before any I/O.
+    /// 3. Equal-length secrets are compared via
+    ///    [`hasp_core::subtle::ConstantTimeEq`] (the same path
+    ///    `cp --verify` uses).
+    /// 4. Both secrets stay inside `SecretString` end-to-end; they are
+    ///    dropped (zeroized) as soon as `compare` returns.
+    ///
+    /// # Side-channel scope
+    ///
+    /// The **return value** discloses only the binary equality. An
+    /// observer who can measure wall-clock latency of `compare` may
+    /// still infer that the two secrets had different lengths (the
+    /// length check short-circuits before `ct_eq`). For the threat
+    /// model `diff` is built for — drift detection between known
+    /// stores — this is the same posture as `cp --verify` and is
+    /// accepted. Length-equal secrets that differ byte-wise are
+    /// timing-flat to the extent `subtle::ConstantTimeEq` provides.
+    ///
+    /// # Errors
+    ///
+    /// Propagates the backend's errors for `get` on either side.
+    /// Returns [`Error::InvalidUrl`] when the two URLs are identical
+    /// (same as `copy`).
+    pub fn compare(&self, a: &str, b: &str) -> Result<DiffOutcome, Error> {
+        let a_url = match Url::parse(a) {
+            Ok(u) => u,
+            Err(e) => return Err(Error::UrlParse(e)),
+        };
+        let b_url = match Url::parse(b) {
+            Ok(u) => u,
+            Err(e) => return Err(Error::UrlParse(e)),
+        };
+        let a_scheme = a_url.scheme().to_owned();
+        let b_scheme = b_url.scheme().to_owned();
+        self.audit(
+            AuditEvent::start(Verb::Diff, a_scheme.clone()).with_dst_scheme(b_scheme.clone()),
+        );
+        let result = self.compare_inner(&a_url, &b_url, a, b);
+        let event = match &result {
+            Ok(DiffOutcome::Match) => AuditEvent::done(Verb::Diff, a_scheme.clone(), "match")
+                .with_dst_scheme(b_scheme.clone()),
+            Ok(DiffOutcome::Differ) => AuditEvent::done(Verb::Diff, a_scheme.clone(), "differ")
+                .with_dst_scheme(b_scheme.clone()),
+            Err(e) => AuditEvent::done(Verb::Diff, a_scheme.clone(), "error")
+                .with_dst_scheme(b_scheme.clone())
+                .with_error_kind(e.kind()),
+        };
+        self.audit(event);
+        result
+    }
+
+    fn compare_inner(
+        &self,
+        a_url: &Url,
+        b_url: &Url,
+        a: &str,
+        b: &str,
+    ) -> Result<DiffOutcome, Error> {
+        if a_url.as_str() == b_url.as_str() {
+            return Err(Error::InvalidUrl(
+                "source and destination are identical".into(),
+            ));
+        }
+
+        // Surface unknown schemes before any fetch — symmetrical with
+        // `copy_inner` so the diff dry-run path stays honest.
+        let a_scheme = a_url.scheme();
+        let b_scheme = b_url.scheme();
+        let _a_backend = self
+            .backends
+            .get(a_scheme)
+            .ok_or_else(|| Error::UnknownScheme(a_scheme.to_owned()))?;
+        let _b_backend = self
+            .backends
+            .get(b_scheme)
+            .ok_or_else(|| Error::UnknownScheme(b_scheme.to_owned()))?;
+
+        let secret_a = self.get(a)?;
+        let secret_b = self.get(b)?;
+        let bytes_a = secret_a.expose_secret().as_bytes();
+        let bytes_b = secret_b.expose_secret().as_bytes();
+        use hasp_core::subtle::ConstantTimeEq;
+        // Length-mismatch implies inequality but is intentionally not
+        // reported as a separate outcome — the boolean is the whole
+        // observable, identical to the `cp --verify` posture.
+        if bytes_a.len() == bytes_b.len() && bytes_a.ct_eq(bytes_b).unwrap_u8() == 1 {
+            Ok(DiffOutcome::Match)
+        } else {
+            Ok(DiffOutcome::Differ)
+        }
+    }
+}
+
+/// Result of [`Store::compare`].
+///
+/// Binary by design — a mismatch must not reveal byte counts, common
+/// prefixes, or any other length-derived signal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiffOutcome {
+    /// Both secrets compared byte-equal.
+    Match,
+    /// The secrets differed (length or content).
+    Differ,
+}
+
+/// What to do when the destination of a `copy` already holds a value.
+///
+/// Default is `Fail`: secrets are valuable and silent clobbering is a
+/// worse outcome than a non-zero exit demanding `--force`. This
+/// deliberately departs from Unix `cp`'s overwrite-by-default.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum IfExists {
+    /// Return `PreconditionFailed` when the destination is occupied.
+    #[default]
+    Fail,
+    /// Write the source value over the destination unconditionally.
+    Overwrite,
+    /// Return `Ok(CopyOutcome { copied: false, .. })` and leave the
+    /// destination untouched.
+    Skip,
+}
+
+/// Options for [`Store::copy`].
+#[derive(Debug, Clone, Default)]
+pub struct CopyOptions {
+    /// Disposition when the destination already holds a value.
+    pub if_exists: IfExists,
+    /// Resolve both URLs and return without reading or writing.
+    pub dry_run: bool,
+    /// Re-read the destination after writing and constant-time compare
+    /// against the source value.
+    pub verify: bool,
+}
+
+/// Outcome of a successful `copy`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CopyOutcome {
+    /// True when a `put` actually executed against the destination.
+    /// False for `dry_run` and for `IfExists::Skip` when the
+    /// destination already had a value.
+    pub copied: bool,
+    /// True only when `opts.verify` was set and the readback matched.
+    pub verified: bool,
 }
 
 use std::sync::OnceLock;

@@ -6,15 +6,73 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 description = "Core contracts, errors, and traits for hasp."
+keywords = ["secrets", "credentials", "secret", "vault", "keyring"]
+categories = ["authentication", "cryptography"]
+documentation = "https://docs.rs/hasp-core"
+readme = "README.md"
 
 [features]
 test-utils = ["dep:tempfile"]
+# Opt-in feature: lock secret pages in physical memory and suppress
+# core-dump / fork leakage of secret-backing allocations. Off by default
+# because RLIMIT_MEMLOCK defaults to 64 KiB on stock Linux distros —
+# exhaustion silently degrades to unprotected (and is logged). Enabled
+# by binary builders for hardened deployments.
+#
+# On Windows, also pulls in the `Win32_System_Memory` windows-sys
+# feature so `VirtualLock` is in scope. Non-memory-lock Windows builds
+# don't link that surface.
+memory-lock = ["windows-sys/Win32_System_Memory"]
+# Opt-in feature flag scaffold for the cross-invocation persistent
+# cache. The feature compiles a `CachePolicy::Persistent` variant and
+# the `PersistentPolicy` struct so binary builders can wire the
+# `HASP_CACHE_TTL` env var and the `hasp cache clear` subcommand
+# today; the actual encrypted-file implementation (XChaCha20-Poly1305
+# ciphertext at `$XDG_CACHE_HOME/hasp/cache.bin` with the symmetric
+# key bound to the OS keyring, UUID-tuple cache keys for `op://`,
+# `MADV_WIPEONFORK` on the in-memory mirror, AWS Agent TTL envelope
+# enforcement) lands in a follow-up to keep `hasp-core` free of
+# platform-specific keyring dependencies for now.
+#
+# Off by default because the cache file path is the exact target
+# surface of the credential-CLI-targeting worm class
+# (Bitwarden 2026.4.0; Mini Shai-Hulud / CanisterWorm May 2026). Only
+# enable when the deployment threat model has been considered — see
+# `docs/src/cli-reference.md#persistent-cache` and the AWS Secrets
+# Manager Agent verbatim warning quoted there.
+cache-persistent = ["dep:dirs"]
 
 [dependencies]
 url = "2.5"
 thiserror = "1.0"
 secrecy = "0.10"
+subtle = "2.6"
+serde_json = { workspace = true }
 tempfile = { version = "3", optional = true }
+# moka: synchronous TTL cache with eviction-listener. The listener fires
+# on Drop, which is the only correct way to zeroize an `Arc<SecretString>`
+# on eviction. Pinned to the `sync` feature only — no async / future
+# integration is needed at this layer.
+moka = { version = "0.12", default-features = false, features = ["sync"] }
+# cache-persistent feature deps. `dirs` is the only non-platform-
+# specific dep needed by the scaffold for resolving the default cache
+# file path; encryption + keyring deps land with the actual
+# implementation in a follow-up.
+dirs = { version = "6", optional = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_ErrorReporting",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Threading",
+] }
 
 [dev-dependencies]
 tempfile = "3"
+proptest = { workspace = true }
+serde_json = { workspace = true }

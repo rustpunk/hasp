@@ -6,11 +6,17 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 description = "file:// backend for hasp — reads secrets from files."
+keywords = ["secrets", "file", "credentials", "hasp"]
+categories = ["authentication", "config"]
+documentation = "https://docs.rs/hasp-backend-file"
+readme = "README.md"
 
 [dependencies]
-hasp-core = { path = "../hasp-core" }
+hasp-core = { workspace = true }
 url = "2.5"
 secrecy = "0.10"
+# Vetted 2026-05-14: rust-lang/glob, zero advisories, canonical glob crate.
+glob = "0.3"
 
 [dev-dependencies]
 tempfile = "3"

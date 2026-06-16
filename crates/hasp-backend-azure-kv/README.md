@@ -5,12 +5,15 @@
 ## URL Grammar
 
 ```
-azure-kv://<vault-name>/<secret-name>?version=<version>
+azure-kv://<vault-name>/<secret-name>?version=<version>&field=<path>
 ```
 
 - `<vault-name>`  — Azure Key Vault name (host). Must be non-empty.
 - `<secret-name>` — Path segment after the host. Must be non-empty.
 - `?version=<version>` — Optional version string. Defaults to latest (empty).
+- `?field=<path>` — Optional dotted JSON path (`password`, `.creds.api_key`).
+  When set, the stored secret value is parsed as JSON and the named scalar is
+  returned. Non-JSON payloads fail with `InvalidUrl`. CLI sugar: `-F <path>`.
 
 Examples:
 

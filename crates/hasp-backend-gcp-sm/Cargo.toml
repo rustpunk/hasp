@@ -6,9 +6,13 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 description = "gcp-sm:// backend for hasp — Google Cloud Secret Manager REST client."
+keywords = ["secrets", "gcp", "google-cloud", "credentials", "hasp"]
+categories = ["authentication", "api-bindings"]
+documentation = "https://docs.rs/hasp-backend-gcp-sm"
+readme = "README.md"
 
 [dependencies]
-hasp-core = { path = "../hasp-core" }
+hasp-core = { workspace = true }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "blocking"] }
 gcp-auth = { package = "gcp_auth", version = "0.12" }
 serde = { version = "1", features = ["derive"] }

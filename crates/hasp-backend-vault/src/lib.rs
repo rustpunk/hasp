@@ -109,6 +109,10 @@ impl Backend for VaultBackend {
         "vault"
     }
 
+    fn validate(&self, url: &Url) -> Result<(), Error> {
+        VaultUrl::try_from(url).map(|_| ())
+    }
+
     fn get(&self, url: &Url) -> Result<SecretString, Error> {
         check_ambient_credentials()?;
         let vault_url = VaultUrl::try_from(url)?;
@@ -430,11 +434,10 @@ fn map_vault_status(status: reqwest::StatusCode, url: &Url) -> Error {
 
 /// Extract the secret value from a Vault KV read response.
 ///
-/// Locates `data.data` then either extracts the named `field` or serializes
-/// the entire object. Non-string field values are rendered via
-/// `serde_json::Value::to_string()` so `get` and `put` with `?field=` are
-/// symmetric for scalar values. Secret values are wrapped in `SecretString`
-/// at this boundary.
+/// Locates `data.data` then either extracts the named `field` via the
+/// shared `hasp_core::extract_field` (supports dotted paths) or
+/// serializes the entire object. Secret values are wrapped in
+/// `SecretString` at this boundary.
 fn extract_secret(body: &serde_json::Value, field: Option<&str>) -> Result<SecretString, Error> {
     let data = body
         .get("data")
@@ -446,14 +449,7 @@ fn extract_secret(body: &serde_json::Value, field: Option<&str>) -> Result<Secre
         })?;
 
     let value = match field {
-        Some(f) => {
-            let v = data
-                .get(f)
-                .ok_or_else(|| Error::NotFound(format!("field '{f}' not found in secret")))?;
-            v.as_str()
-                .map(|s| s.to_owned())
-                .unwrap_or_else(|| v.to_string())
-        }
+        Some(f) => hasp_core::extract_field(data, f)?,
         None => data.to_string(),
     };
 
@@ -601,6 +597,19 @@ mod tests {
         });
         let err = extract_secret(&body, Some("missing")).unwrap_err();
         assert!(matches!(err, Error::NotFound(_)));
+    }
+
+    #[test]
+    fn extract_field_dotted_path_into_nested_object() {
+        let body = serde_json::json!({
+            "data": {
+                "data": {
+                    "credentials": { "api_key": "ak-xyz" }
+                }
+            }
+        });
+        let secret = extract_secret(&body, Some(".credentials.api_key")).unwrap();
+        assert_eq!(secret.expose_secret(), "ak-xyz");
     }
 
     #[test]

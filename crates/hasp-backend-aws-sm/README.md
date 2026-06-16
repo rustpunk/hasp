@@ -5,13 +5,16 @@
 ## URL grammar
 
 ```
-aws-sm://<region>/<secret-name>?version-stage=<stage>&version-id=<id>
+aws-sm://<region>/<secret-name>?version-stage=<stage>&version-id=<id>&field=<path>
 ```
 
 - `<region>` — AWS region (e.g. `us-east-1`, `eu-west-1`). Required, host component.
 - `<secret-name>` — Secret name or full ARN. Path component; leading `/` stripped.
 - `?version-stage=<stage>` — Optional version stage (`AWSCURRENT`, `AWSPREVIOUS`, …).
 - `?version-id=<id>` — Optional version UUID. Mutually exclusive with `version-stage`.
+- `?field=<path>` — Optional dotted JSON path (`password`, `.creds.api_key`).
+  When set, the stored secret value is parsed as JSON and the named scalar is
+  returned. Non-JSON payloads fail with `InvalidUrl`. CLI sugar: `-F <path>`.
 
 Examples:
 

@@ -5,17 +5,34 @@
 //! It intentionally has no profile, TTY, or config dependencies —
 //! those live in `hasp-cli`.
 
+pub mod audit;
+pub mod cache;
 pub mod error;
+pub mod field;
+pub mod hardening;
 pub mod proxy;
 pub mod retry;
+pub mod secret_mem;
 
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_utils;
 
+#[cfg(unix)]
+pub use audit::SyslogSink;
+pub use audit::{AuditEvent, AuditSink, CacheEvent, FileSink, NoopSink, StderrSink, Verb};
+pub use cache::{CacheKey, CachePolicy, ProcessCache};
 pub use error::{BackendFailureKind, Error};
+pub use field::{extract_field, extract_field_from_str};
+#[cfg(feature = "memory-lock")]
+pub use hardening::lock_secret_pages;
+pub use hardening::{
+    apply_mitigations, check_refusal_conditions, harden_process, install, HardenRefusal,
+    HardeningToken, MitigationOutcome,
+};
 pub use proxy::{is_no_proxy, resolve_proxy_from_env, ProxyConfig};
 pub use retry::RetryBackend;
 pub use secrecy::{ExposeSecret, SecretString};
+pub use subtle;
 
 use url::Url;
 
@@ -66,6 +83,17 @@ pub trait Backend: Send + Sync {
 
     /// Returns `true` if a secret exists at the given URL.
     fn exists(&self, url: &Url) -> Result<bool, Error>;
+
+    /// Validate URL grammar without performing I/O.
+    ///
+    /// Backends override by delegating to their existing URL `TryFrom`.
+    /// Used by `Store::resolve` so `--explain` rejects the same URLs
+    /// `get` would — keeps the dry-run path honest about what an actual
+    /// operation would do. Default impl is a no-op for backends that
+    /// have no grammar to validate beyond the scheme.
+    fn validate(&self, _url: &Url) -> Result<(), Error> {
+        Ok(())
+    }
 }
 
 /// A named entry returned by `Backend::list`.

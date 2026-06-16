@@ -155,6 +155,10 @@ impl Backend for AwsSsmBackend {
         "aws-ssm"
     }
 
+    fn validate(&self, url: &Url) -> Result<(), Error> {
+        AwsSsmUrl::try_from(url).map(|_| ())
+    }
+
     fn get(&self, url: &Url) -> Result<SecretString, Error> {
         let aws_url = AwsSsmUrl::try_from(url)?;
         self.block_on(get_parameter(&aws_url, aws_url.with_decryption))?

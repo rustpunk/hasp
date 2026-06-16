@@ -211,6 +211,56 @@ Operation:   get
 Use it to debug alias expansion, proxy routing, or cache state before
 running a destructive command.
 
+## Cross-backend migration with `cp`
+
+Because URLs are uniform across stores, copying a secret from one
+backend to another is a single command:
+
+```bash
+# Move a value from a local file into Vault
+hasp cp file:///etc/secrets/db.txt vault://kv/data/myapp/db
+
+# Roll a credential between environments after rotation
+hasp cp @prod/db @stage/db --yes --verify
+```
+
+`hasp cp` is the only verb that reads *and* writes a secret in one
+invocation, so it ships with stricter defaults than the other verbs
+(refuses to overwrite by default, refuses cross-environment copies
+unless `--yes`, refuses plain-http proxies unless
+`HASP_ALLOW_HTTP_PROXY=1`). Add `environment = "..."` to a profile
+entry in `profiles.toml` to enable the cross-environment safety net:
+
+```toml
+[profiles.prod]
+environment = "prod"
+db = "aws-sm://us-east-1/prod/db-password"
+
+[profiles.stage]
+environment = "stage"
+db = "aws-sm://us-east-1/stage/db-password"
+```
+
+See [CLI Reference: `hasp cp`](cli-reference.md#hasp-cp-src-dst) for
+the full flag set and security model.
+
+## Drift detection with `diff`
+
+`hasp diff` is the read-only sibling of `cp`: it answers the
+"did staging and prod drift?" question without printing either value.
+
+```bash
+hasp diff @stage/db @prod/db                  # exits 0 on match, 1 on differ
+hasp diff aws-sm://us-east-1/api vault://kv/data/api?field=token
+```
+
+The verdict is binary by construction — `match` or `differ`. A mismatch
+reveals no byte counts, common prefixes, or hashes; the compare path
+uses constant-time equality so timing channels are not informative
+either. Cross-environment refusal and plain-http proxy refusal mirror
+`cp`. See [CLI Reference: `hasp diff`](cli-reference.md#hasp-diff-a-b)
+for the full flag set.
+
 ## Where to next
 
 - [Profile Aliases](profiles.md) — alias resolution rules, config

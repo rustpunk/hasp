@@ -6,9 +6,13 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 description = "aws-sm:// backend for hasp — AWS Secrets Manager SDK client."
+keywords = ["secrets", "aws", "secrets-manager", "credentials", "hasp"]
+categories = ["authentication", "api-bindings"]
+documentation = "https://docs.rs/hasp-backend-aws-sm"
+readme = "README.md"
 
 [dependencies]
-hasp-core = { path = "../hasp-core" }
+hasp-core = { workspace = true }
 aws-config = { version = "1", default-features = false, features = ["rustls"] }
 aws-sdk-secretsmanager = { version = "1", default-features = false }
 tokio = { version = "1", features = ["rt"] }

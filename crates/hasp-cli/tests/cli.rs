@@ -149,6 +149,10 @@ my_secret = "env://HASP_CLI_PROFILE_SECRET"
     let output = hasp()
         .args(["get", "@test/my_secret"])
         .env("HASP_PROFILES_PATH", profile_path.as_os_str())
+        // Default-on profile-allow enforcement would refuse this temp
+        // profiles.toml; this test is about profile resolution, not
+        // trust enforcement, so opt out.
+        .env("HASP_REQUIRE_PROFILE_ALLOW", "0")
         .output()
         .unwrap();
 
@@ -636,11 +640,12 @@ fn cli_quiet_flag_overrides_verbose() {
         "hasp get -q -v failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    // stderr should be empty because -q suppresses -v traces
+    // -q suppresses verbose operation traces ("hasp: get …"), but
+    // structured audit events are a separate channel and still appear.
+    let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        output.stderr.is_empty(),
-        "quiet should suppress verbose traces, got stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
+        !stderr.contains("hasp: get"),
+        "quiet should suppress verbose operation trace, got stderr: {stderr}"
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert_eq!(stdout.trim_end(), "quiet-works");

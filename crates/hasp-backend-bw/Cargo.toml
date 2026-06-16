@@ -6,12 +6,16 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 description = "bw:// backend for hasp — Bitwarden CLI subprocess wrapper."
+keywords = ["secrets", "bitwarden", "credentials", "cli", "hasp"]
+categories = ["authentication", "api-bindings"]
+documentation = "https://docs.rs/hasp-backend-bw"
+readme = "README.md"
 
 [dependencies]
-hasp-core = { path = "../hasp-core" }
+hasp-core = { workspace = true }
 serde_json = "1"
 url = "2.5"
 
 [dev-dependencies]
 url = "2.5"
-hasp-core = { path = "../hasp-core", features = ["test-utils"] }
+hasp-core = { workspace = true, features = ["test-utils"] }

@@ -243,6 +243,10 @@ impl Backend for KeyringBackend {
         "keyring"
     }
 
+    fn validate(&self, url: &Url) -> Result<(), Error> {
+        KeyringUrl::try_from(url).map(|_| ())
+    }
+
     fn get(&self, url: &Url) -> Result<SecretString, Error> {
         ensure_init()?;
         let keyring_url = KeyringUrl::try_from(url)?;

@@ -6,9 +6,13 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 description = "aws-ssm:// backend for hasp — AWS SSM Parameter Store SDK client."
+keywords = ["secrets", "aws", "ssm", "parameter-store", "hasp"]
+categories = ["authentication", "api-bindings"]
+documentation = "https://docs.rs/hasp-backend-aws-ssm"
+readme = "README.md"
 
 [dependencies]
-hasp-core = { path = "../hasp-core" }
+hasp-core = { workspace = true }
 aws-config = { version = "1", default-features = false, features = ["rustls"] }
 aws-sdk-ssm = { version = "1", default-features = false }
 tokio = { version = "1", features = ["rt"] }

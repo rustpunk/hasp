@@ -6,11 +6,16 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 description = "op:// backend for hasp — 1Password CLI subprocess wrapper."
+keywords = ["secrets", "onepassword", "credentials", "cli", "hasp"]
+categories = ["authentication", "api-bindings"]
+documentation = "https://docs.rs/hasp-backend-op"
+readme = "README.md"
 
 [dependencies]
-hasp-core = { path = "../hasp-core" }
+hasp-core = { workspace = true }
 url = "2.5"
 secrecy = "0.10"
+serde_json = { workspace = true }
 
 [dev-dependencies]
-hasp-core = { path = "../hasp-core", features = ["test-utils"] }
+hasp-core = { workspace = true, features = ["test-utils"] }

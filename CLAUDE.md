@@ -2,32 +2,71 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## Status: name reservation only
+## Status: 0.2.0-alpha (publish-ready); library API stabilizing toward 0.1.0
 
-`hasp` is published to crates.io as a `0.1.0-alpha` placeholder. `src/lib.rs` is six lines of doc comment with no implementation. Most "what does the code do" questions are premature — there is no code yet, only the design captured in `README.md`.
+`hasp 0.1.0-alpha` is the placeholder currently on crates.io. The next
+publish is `0.2.0-alpha`, and the workspace is prepped for it (see the
+Publishing section). That release carries the `CHANGELOG.md` train: a
+retry decorator, batch / bulk operations, dry-run diagnostics, SOCKS5
+proxy support, `hasp init`, `hasp cp` (cross-backend copy with hardening),
+the per-invocation hardening-gated cache, and the `hasp-core::hardening`
+process-protection module. All ten backends implement
+`get` / `put` / `list` / `delete` / `exists` (where the backend's
+semantics allow). The library API is stabilizing before a `0.1.0` release.
 
-The crate ships in two shapes: a **library** (`hasp::…`) consumable from other Rust projects, and a **standalone CLI** (`hasp` binary) that is a thin shell over the library API. Both surfaces are first-class — design choices that help one at the expense of the other need a deliberate justification.
+Workspace layout (cargo workspace, edition 2021, MIT OR Apache-2.0):
+- `crates/hasp-core` — `Backend` trait, `Error` taxonomy,
+  `RetryBackend`, `ProxyConfig`, `hardening` module (refusal +
+  best-effort platform mitigations).
+- `crates/hasp` — `Store` facade, scheme dispatch, TTL cache,
+  `batch_get` / `bulk_put` / `copy`, factory functions.
+- `crates/hasp-cli` — clap subcommand shell over the library.
+- `crates/hasp-backend-*` — one crate per backend; all feature-gated.
 
-When asked to "add a feature" or "fix a bug", first check whether the request presupposes implementation that does not exist. If so, surface that to the user before scaffolding — the right answer is often a planning conversation, not a speculative skeleton.
+Both surfaces are first-class — design choices that help one at the
+expense of the other need a deliberate justification.
+
+Before scaffolding a new feature, check `docs/internal/research/` (11
+RESEARCH-*.md files: keyring grammar, error taxonomy, op caching,
+secrets zeroization, file trim, failure modes, ferrule parity, cp
+threat model) and `notes/` (cli prior-art across 19 tools, perf data,
+threat-model standards). Most early decisions have already been
+ground-truthed there.
 
 ## Build & test
 
-Vanilla single-crate Cargo layout, edition 2021, MIT OR Apache-2.0:
-
 ```
-cargo build                       # debug build of lib + bin
+cargo build --workspace
 cargo build --release
-cargo run -- get @prod/db-pass    # once the bin exists
-cargo test --all-features
-cargo test -p hasp --lib          # library-only tests
-cargo doc --no-deps --open        # library API docs
-cargo clippy --all-targets -- -D warnings
-cargo fmt
+cargo test --workspace --all-features
+cargo test -p hasp --lib
+cargo doc --workspace --no-deps --open
+cargo clippy --workspace --all-targets -- -D warnings
+cargo fmt --all
+cargo deny check
 ```
 
-`Cargo.lock` is currently git-ignored. Once the `[[bin]]` target lands, switch to committing it — the standard Cargo guidance for binary-shipping crates. `target/` and `lancedb/` stay local-only.
+`Cargo.lock` is checked in (standard guidance for binary-shipping
+crates). `target/` is git-ignored.
 
-## Planned architecture (from README.md)
+## Publishing
+
+The workspace publishes as **13 crates, not one**. Invariants:
+
+- Internal dependencies carry **both `path` and `version`**, defined once
+  in `[workspace.dependencies]` in the root `Cargo.toml` and referenced per
+  crate as `x = { workspace = true }`. `cargo publish` strips `path` and
+  resolves `version` from the registry, so a `path`-only internal dep fails
+  verification. When bumping, change `workspace.package.version` **and**
+  every internal `version` in `[workspace.dependencies]` together.
+- Publish with `cargo publish --workspace` — it computes the order
+  (`hasp-core` → the ten backends → `hasp` → `hasp-cli`) and waits on the
+  index between tiers. Verify without uploading via
+  `cargo publish --dry-run --workspace`.
+- `hasp` already occupies `0.1.0-alpha` on crates.io (the placeholder); the
+  sibling crate names are first-time publishes.
+
+## Architecture invariants
 
 `hasp` is a unified `get` / `put` / `list` / `delete` / `exists` over multiple keyed secret stores, addressed by URL scheme. Any future code should preserve these design invariants:
 
