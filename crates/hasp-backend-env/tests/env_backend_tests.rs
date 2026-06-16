@@ -1,4 +1,5 @@
 use hasp_backend_env::EnvBackend;
+use hasp_core::test_utils::{EnvGuard, ENV_LOCK};
 use hasp_core::{Backend, SecretString};
 use secrecy::ExposeSecret;
 use url::Url;
@@ -6,20 +7,19 @@ use url::Url;
 #[test]
 fn get_existing_env_var_returns_secret() {
     let var = "HASP_ENV_TEST_GET_OK";
-    std::env::set_var(var, "secret-value");
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = EnvGuard::set(var, "secret-value");
 
     let backend = EnvBackend;
     let url = Url::parse(&format!("env://{var}")).unwrap();
     let secret = backend.get(&url).unwrap();
     assert_eq!(secret.expose_secret(), "secret-value");
-
-    std::env::remove_var(var);
 }
 
 #[test]
 fn get_missing_env_var_returns_not_found() {
     let var = "HASP_ENV_TEST_GET_MISSING";
-    std::env::remove_var(var);
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
     let backend = EnvBackend;
     let url = Url::parse(&format!("env://{var}")).unwrap();
@@ -59,19 +59,18 @@ fn delete_returns_unsupported() {
 #[test]
 fn exists_returns_true_for_existing() {
     let var = "HASP_ENV_TEST_EXISTS_OK";
-    std::env::set_var(var, "1");
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = EnvGuard::set(var, "1");
 
     let backend = EnvBackend;
     let url = Url::parse(&format!("env://{var}")).unwrap();
     assert!(backend.exists(&url).unwrap());
-
-    std::env::remove_var(var);
 }
 
 #[test]
 fn exists_returns_false_for_missing() {
     let var = "HASP_ENV_TEST_EXISTS_MISSING";
-    std::env::remove_var(var);
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
     let backend = EnvBackend;
     let url = Url::parse(&format!("env://{var}")).unwrap();

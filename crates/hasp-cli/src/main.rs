@@ -55,6 +55,14 @@ struct Cli {
     /// supply-chain worms — see cli-reference.md#caching).
     #[arg(long, global = true)]
     no_cache: bool,
+
+    /// Retry transient HTTP-backend failures up to this many times.
+    #[arg(long, global = true)]
+    retries: Option<u32>,
+
+    /// Base backoff between retries, in milliseconds (used with --retries).
+    #[arg(long, global = true, default_value_t = 100)]
+    retry_base_delay_ms: u64,
 }
 
 #[derive(Subcommand)]
@@ -335,11 +343,14 @@ fn run(cli: Cli, hardening_token: hasp::HardeningToken) -> Result<(), (i32, Stri
     let proxy = resolve_proxy(&cli, &profiles)?;
     let audit_sink = resolve_audit_sink();
     let cache_policy = resolve_cache_policy(&cli);
-    let store = hasp::StoreBuilder::with_defaults()
+    let mut builder = hasp::StoreBuilder::with_defaults()
         .proxy(proxy)
         .with_audit_sink(audit_sink.clone())
-        .with_cache_policy(cache_policy, hardening_token)
-        .build();
+        .with_cache_policy(cache_policy, hardening_token);
+    if let Some(n) = cli.retries {
+        builder = builder.with_retry(n, std::time::Duration::from_millis(cli.retry_base_delay_ms));
+    }
+    let store = builder.build();
 
     // `cp` and `diff` handle `--explain` in their own arms because
     // both have two addresses to resolve. Every other verb's dry-run
